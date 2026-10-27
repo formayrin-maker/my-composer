@@ -1,4 +1,5 @@
 
+
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -244,25 +245,22 @@ async function loadSamplerForInstrument(instrValue, noteList){
     setStatus('필요한 샘플 확인 중...', 'loading', true);
     const urls = await buildSamplerMappingForNotes(baseUrl, noteList);
     if (!urls || Object.keys(urls).length === 0){
-      setStatus('해당 악기의 샘플을 찾지 못했습니다 — 합성기 폴백', 'err', true);
+      setStatus('해당 악기의 샘플을 찾지 못했습니다 — 반주는 재생되지 않습니다', 'err', true);
       return;
     }
     setStatus('샘플 로드 중...', 'loading', true);
     melodySampler = new Tone.Sampler({
       urls,
       baseUrl,
-      onload: ()=>{ samplerReady = true; window.samplerReady = true; setStatus('샘플 준비 완료 — 실제 음색으로 재생', 'ok', true);
-                    // if auto restart pending, trigger it
-                    if (autoRestartPending){ autoRestartPending = false; // restart playback
-                      try{ startPlayback(); }catch(e){ console.warn('auto restart failed', e); }
-                    }
+      onload: ()=>{ samplerReady = true; window.samplerReady = true; setStatus('반주 샘플 준비 완료 — 실제 음색으로 재생', 'ok', true);
+                    if (autoRestartPending){ autoRestartPending = false; try{ startPlayback(); }catch(e){} }
                   },
-      onerror: (err)=>{ console.warn('sampler error', err); setStatus('샘플 로드 중 일부 실패 — 합성기 폴백', 'err', true); }
+      onerror: (err)=>{ console.warn('sampler error', err); setStatus('샘플 로드 실패 — 반주는 재생되지 않습니다', 'err', true); }
     }).toDestination();
     window.melodySampler = melodySampler;
   }catch(err){
     console.warn('loadSamplerForInstrument error', err);
-    setStatus('샘플 초기화 실패 — 합성기로 재생', 'err', true);
+    setStatus('샘플 초기화 실패 — 반주는 재생되지 않습니다', 'err', true);
   }
 }
 
@@ -536,7 +534,7 @@ document.getElementById('undoBtn').addEventListener('click', ()=>{
 function setActiveButtons(){ document.querySelectorAll('.dur-btn').forEach(b=>b.classList.remove('active')); if (selectedIsRest) document.getElementById('rest_'+selectedDur).classList.add('active'); else document.getElementById('dur_'+selectedDur).classList.add('active'); }
 ['w','h','q','8'].forEach(d=>{ document.getElementById('dur_'+d).addEventListener('click', ()=>{ selectedIsRest=false; selectedDur=d; setActiveButtons(); }); document.getElementById('rest_'+d).addEventListener('click', ()=>{ selectedIsRest=true; selectedDur=d; setActiveButtons(); }); });
 
-// recommend buttons
+// recommend buttons (initial placeholders - will be replaced by patch)
 document.getElementById('recommendNoteBtn').addEventListener('click', ()=>{
   const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
   if (idx < 0){ flashError('모든 마디가 채워졌습니다'); return; }
@@ -573,7 +571,7 @@ document.getElementById('playBtn').addEventListener('click', async ()=>{
   for (const m of measures) for (const n of m) if (!n.isRest && n.pitch && n.pitch.play) uniq.add(n.pitch.play);
   const usedNotes = Array.from(uniq);
 
-  try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('Tone.start/resume:', e); }
+  try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('Tone.start/resume', e); }
 
   if (usedNotes.length > 0){
     // start loading but don't block: allow up to 2.2s wait for sampler
@@ -735,67 +733,64 @@ window.addEventListener('resize', ()=>{ clearTimeout(window._rT); window._rT = s
 
 </script>
 
-<!-- === 아래는 패치 스크립트: 실음 반주 전용 + 추천 개선 (중간 음역 B 규칙) === -->
+<!-- ================== 여기부터 병합된 최종 패치 (실음 전용 반주, 추천 개선) ================== -->
 <script>
 (function(){
-  if (window.__accomp_patch_vfinal) return;
-  window.__accomp_patch_vfinal = true;
-  console.log('[AI-B] Installing accompaniment & recommend B-patch');
+  if (window.__ai_final_accomp_patch_done) { console.log('[AI-FINAL] patch already installed'); return; }
+  window.__ai_final_accomp_patch_done = true;
+  console.log('[AI-FINAL] Installing final accompaniment & recommend patch');
 
-  // 1) 툴바에 한글 반주 UI 추가 (없음 / 피아노 / 어쿠스틱기타)
-  (function injectAccompUI(){
+  // --- 1) 툴바에 반주 UI (없음/피아노/어쿠스틱기타) --- //
+  (function ensureAccompUI(){
     const toolbar = document.querySelector('.toolbar');
     if (!toolbar) return;
-    // wrapper label
+    if (document.getElementById('accompInstrSelect')) {
+      console.log('[AI-FINAL] accomp UI exists');
+      return;
+    }
     const wrap = document.createElement('label');
     wrap.style.display = 'flex';
     wrap.style.alignItems = 'center';
     wrap.style.gap = '6px';
     wrap.style.marginLeft = '6px';
     wrap.innerHTML = '반주 악기:';
-
     const select = document.createElement('select');
     select.id = 'accompInstrSelect';
     select.style.padding = '8px 10px';
     select.style.borderRadius = '8px';
     select.style.border = '1px solid #cbd5e1';
     select.style.fontWeight = '700';
-    // options: 한글 표시, 값은 기존 샘플 폴더 키와 매칭
     const opts = [
       { val:'none', text:'없음' },
       { val:'acoustic_grand_piano', text:'피아노' },
       { val:'acoustic_guitar_nylon', text:'어쿠스틱기타' }
     ];
     opts.forEach(o=>{ const opt=document.createElement('option'); opt.value=o.val; opt.textContent=o.text; select.appendChild(opt); });
-
-    // pattern select
     const patLabel = document.createElement('span'); patLabel.textContent = '형식:';
     const pattern = document.createElement('select'); pattern.id = 'accompPattern';
     pattern.style.padding='8px 10px'; pattern.style.borderRadius='8px'; pattern.style.border='1px solid #cbd5e1'; pattern.style.fontWeight='700';
     ['arpeggio','block','strum'].forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent = v; pattern.appendChild(o); });
-
     const volLabel = document.createElement('span'); volLabel.textContent = '볼륨:';
     const vol = document.createElement('input'); vol.type='range'; vol.id='accompVol'; vol.min='0'; vol.max='1'; vol.step='0.01'; vol.value='0.22';
     vol.style.verticalAlign='middle';
-
     wrap.appendChild(select);
     wrap.appendChild(patLabel);
     wrap.appendChild(pattern);
     wrap.appendChild(volLabel);
     wrap.appendChild(vol);
-
     toolbar.appendChild(wrap);
+    console.log('[AI-FINAL] Patch UI injected');
   })();
 
-  // 2) 헬퍼: 노트 이름 <-> 세미톤 변환(간단)
-  const pcMap = { C:0,'C#':1,Db:1,D:2,'D#':3,Eb:3,E:4,F:5,'F#':6,Gb:6,G:7,'G#':8,Ab:8,A:9,'A#':10,Bb:10,B:11 };
+  // --- 2) 헬퍼: 음 이름 <-> 세미톤 --- //
+  const PC = { C:0,'C#':1,Db:1,D:2,'D#':3,Eb:3,E:4,F:5,'F#':6,Gb:6,G:7,'G#':8,Ab:8,A:9,'A#':10,Bb:10,B:11 };
   function nameToSemitone(name){
     if(!name) return null;
-    const m = name.match(/^([A-G][#b]?)(\d)$/);
+    const m = String(name).match(/^([A-G][#b]?)(\\d)$/);
     if(!m) return null;
     const pc = m[1], oct = parseInt(m[2],10);
-    if(!(pc in pcMap)) return null;
-    return pcMap[pc] + oct*12;
+    if(!(pc in PC)) return null;
+    return PC[pc] + oct*12;
   }
   function semitoneToName(semi){
     const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -804,7 +799,7 @@ window.addEventListener('resize', ()=>{ clearTimeout(window._rT); window._rT = s
     return names[pc] + oct;
   }
 
-  // 3) 마디 루트(세미톤) 추정: 해당 마디의 마지막 비휴지 음 -> 이전 마디 순회 -> 조성 tonic
+  // --- 3) 마디 루트 추정 --- //
   function deriveRootSemitone(measureIdx){
     for (let m = measureIdx; m >= 0; m--){
       const arr = measures[m] || [];
@@ -813,9 +808,7 @@ window.addEventListener('resize', ()=>{ clearTimeout(window._rT); window._rT = s
         if (!n || n.isRest) continue;
         const pname = n.pitch && n.pitch.play ? n.pitch.play : (n.play || null);
         const sem = nameToSemitone(pname);
-        if (sem !== null) {
-          return (sem % 12) + 4*12; // normalize to octave 4 base
-        }
+        if (sem !== null) return (sem % 12) + 4*12;
       }
     }
     const key = document.getElementById('keySelect') ? document.getElementById('keySelect').value : 'C';
@@ -823,189 +816,162 @@ window.addEventListener('resize', ()=>{ clearTimeout(window._rT); window._rT = s
     return nameToSemitone(tonicMap[key] || 'C4');
   }
 
-  // 4) 1-4-5 화음음 리스트(노트 이름)
   function chordTonesFromRootSemitone(rootSem){
-    return [rootSem, rootSem + 5, rootSem + 7].map(semi => semitoneToName(semi));
+    return [rootSem, rootSem + 5, rootSem + 7].map(s => semitoneToName(s));
   }
 
-  // 5) 수집: 모든 마디에서 계획할 반주용 음 목록(각 마디의 chord tones, 중복 제거)
-  function collectAccompanimentNotesForAllMeasures(){
-    const noteSet = new Set();
-    for(let m=0;m<NUM_MEASURES;m++){
-      const root = deriveRootSemitone(m);
-      const tones = chordTonesFromRootSemitone(root);
-      // prefer octave 4/3 placement - adjust to mid-range (C3..C5)
-      tones.forEach(t=>{
-        const sem = nameToSemitone(t);
-        if (sem === null) return;
-        // bring to mid-range: between C3(36) and C5(60)
-        let target = sem;
-        while (target < 48) target += 12; // bring up to >= C4(48)
-        while (target > 72) target -= 12;
-        // clamp to C3..C5 approximately
-        if (target < 48) target = 48;
-        if (target > 72) target = 72;
-        noteSet.add(semitoneToName(target));
-      });
-    }
-    return Array.from(noteSet);
-  }
-
-  // 6) accompaniment scheduling (샘플 전용; samplerReady 체크)
-  function scheduleAccompanimentWithSampler(playToken){
-    // clear previous accompaniment schedules: we will schedule alongside existing melody schedules
-    // we add schedules only if melodySampler (Tone.Sampler) is ready
-    if (!window.melodySampler || !window.samplerReady) {
-      console.log('[AI-B] sampler not ready: accompaniment will not be scheduled (sample-only)');
-      return;
-    }
-    // clear prior accompaniment schedules that we created (we'll not cancel global Transport schedules here to avoid disturbing melody)
-    // We'll schedule measure-level accompaniment events using Tone.Transport.schedule with passed-in times
-    const secPerBeat = 60 / tempo;
-    let absoluteTime = 0;
-    for (let m=0;m<NUM_MEASURES;m++){
-      const measureIndex = m;
-      Tone.Transport.schedule((time)=>{
-        if (playId !== playToken) return;
-        // check if melody exists at all in entire score; only play accompaniment if there's at least one melodic note
-        const hasMelody = measures.some(ms => ms.some(n => n && !n.isRest));
-        if (!hasMelody) return;
-        const instrChoice = document.getElementById('accompInstrSelect') ? document.getElementById('accompInstrSelect').value : 'none';
-        if (!instrChoice || instrChoice === 'none') return;
-        const pat = document.getElementById('accompPattern') ? document.getElementById('accompPattern').value : 'arpeggio';
-        const volInput = document.getElementById('accompVol') ? parseFloat(document.getElementById('accompVol').value) : 0.22;
-        // determine chord tones for this measure
-        const root = deriveRootSemitone(measureIndex);
-        const tones = chordTonesFromRootSemitone(root);
-        // adjust octave to mid-range C3..C5 (48..72 semitones approx for C4=48)
-        const adjusted = tones.map(t=>{
-          const sem = nameToSemitone(t);
-          if (sem===null) return null;
-          let s = sem;
-          while (s < 48) s += 12;
-          while (s > 72) s -= 12;
-          return semitoneToName(s);
-        }).filter(Boolean);
-        if (adjusted.length === 0) return;
-        // volume control: melodySampler is already routed to destination; we can create a gain node wrapper for accompaniment play if needed
-        // We'll manually trigger sampler notes at time with small dynamic volume factor by scheduling velocity param (Tone.Sampler doesn't accept velocity directly here),
-        // So we simulate by using sampler.triggerAttackRelease(name, dur, time) and let overall page volume be controlled by system mixer.
-        if (pat === 'arpeggio'){
-          // play 4 quarter arpeggio across the measure
-          for (let i=0;i<4;i++){
-            const note = adjusted[i % adjusted.length];
-            const dur = secPerBeat * 0.95;
-            try{
-              window.melodySampler.triggerAttackRelease(note, dur, time + i*secPerBeat);
-            }catch(e){ console.warn('[AI-B] accompaniment trigger failed', e); }
-          }
-        } else if (pat === 'strum'){
-          // strum on beat 1 and 3 with small stagger
-          [0,2].forEach(b=>{
-            adjusted.forEach((note, idx)=>{
-              const offset = idx * 0.04; // small roll
-              try{ window.melodySampler.triggerAttackRelease(note, secPerBeat*1.7, time + b*secPerBeat + offset); }catch(e){}
-            });
-          });
-        } else {
-          // block chord on downbeat
-          adjusted.forEach(note=>{
-            try{ window.melodySampler.triggerAttackRelease(note, secPerBeat*1.8, time); }catch(e){}
-          });
-        }
-      }, absoluteTime);
-      // measure duration: sum of beats or default 4
-      const sumBeats = (measures[m] || []).reduce((s,n)=>s + (n.beats || 0), 0);
-      const durBeats = sumBeats > 0 ? sumBeats : BEATS_PER_MEASURE;
-      absoluteTime += durBeats * secPerBeat;
-    }
-    console.log('[AI-B] accompaniment scheduled');
-  }
-
-  // 7) startPlayback wrapper: if user selected accompaniment and melody exists, attempt to load accompaniment samples first (sample-only)
-  const originalStartPlayback = window.startPlayback;
-  window.startPlayback = async function(){
-    // ensure user gesture
-    try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('[AI-B] Tone.start/resume failed', e); }
-    // collect melody existence
-    const hasMelody = measures.some(m => m.some(n => n && !n.isRest));
-    const accomChoice = document.getElementById('accompInstrSelect') ? document.getElementById('accompInstrSelect').value : 'none';
-    const playToken = ++playId;
-    // if accompaniment requested AND melody exists -> attempt to load sampler for accompaniment chord tones
-    if (accomChoice && accomChoice !== 'none' && hasMelody){
-      // collect chord-tone notes across measures to preload samples
-      const notesToLoad = collectAccompanimentNotesForAllMeasures();
-      // if nothing to load, fallback to not playing accompaniment
-      if (notesToLoad.length > 0){
-        // use existing loadSamplerForInstrument function (it expects instrument key such as 'acoustic_grand_piano' or 'acoustic_guitar_nylon')
-        // Map user's selection to appropriate soundfont key
-        let sfInstr = accomChoice;
-        // for acoustic_guitar_nylon use same key name present in instrMap
-        if (!(sfInstr in instrMap)) {
-          // fallback mapping: if user selected 'acoustic_guitar_nylon' earlier, it's included; otherwise use acoustic_grand_piano
-          sfInstr = 'acoustic_grand_piano';
-        }
-        // attempt to load and wait up to 3000ms; if samplerReady within timeout, schedule accompaniment; otherwise do not play accompaniment
-        const loadPromise = loadSamplerForInstrument(sfInstr, notesToLoad);
-        const timeout = new Promise(res=>setTimeout(res,3000));
-        await Promise.race([loadPromise, timeout]);
-        if (window.samplerReady && window.melodySampler){
-          // schedule both melody (original) and accompaniment together
-          try{
-            // call original scheduling (which schedules melody) AFTER we set tempo and any needed state
-            // We call originalStartPlayback which schedules melody into Transport
-            if (typeof originalStartPlayback === 'function') originalStartPlayback();
-            // schedule accompaniment now (it uses window.melodySampler)
-            scheduleAccompanimentWithSampler(playToken);
-          }catch(e){ console.warn('[AI-B] scheduling error', e); if (typeof originalStartPlayback === 'function') originalStartPlayback(); }
-          return;
-        } else {
-          console.log('[AI-B] sampler did not become ready within timeout; playing melody only (no synth fallback as requested)');
-          // play melody only
-          if (typeof originalStartPlayback === 'function') originalStartPlayback();
-          return;
-        }
-      } else {
-        // no chord tones calculable -> just play melody
-        if (typeof originalStartPlayback === 'function') originalStartPlayback();
-        return;
-      }
-    } else {
-      // accompaniment not requested or no melody -> just play melody
-      if (typeof originalStartPlayback === 'function') originalStartPlayback();
-      return;
-    }
-  };
-
-  // 8) 추천 로직 개선: recommendNote (한 음 또는 쉼표) / recommendMelody (한 마디, 남은 박자만)
-  function pickNonRepeating(candidates, banned){
-    if (!candidates || candidates.length===0) return null;
-    const filtered = candidates.filter(c=>c!==banned);
-    const pool = filtered.length>0 ? filtered : candidates;
-    return pool[Math.floor(Math.random()*pool.length)];
-  }
-
-  // helper: constrain semitone to mid-range (C3..C5 -> 48..72)
-  function constrainToMidRange(semi){
+  // --- 4) mid-range 제약: C4 중심 --- //
+  function constrainToCenterC4(semi){
     if (semi === null) return null;
+    // center C4 = 60 (MIDI-like where C4=60). But in earlier mapping C4 could be 60 or 48 depending; our nameToSemitone uses A4 mapping variant (we used oct*12 with C0); test with semitoneFromName of C4 yields 48 in previous code. To be consistent with our code above, bring into octave 4 region roughly 48..72.
     let s = semi;
     while (s < 48) s += 12;
     while (s > 72) s -= 12;
+    // Now bias toward middle C region around 60 (approx), but keep within 52..64 to keep it close to C4 area for students.
+    if (s < 52) s += 12;
+    if (s > 64) s -= 12;
     if (s < 48) s = 48;
     if (s > 72) s = 72;
     return s;
   }
 
-  // override recommendNoteBtn behavior
-  const rnBtn = document.getElementById('recommendNoteBtn');
-  if (rnBtn){
-    rnBtn.replaceWith(rnBtn.cloneNode(true));
-    const newBtn = document.getElementById('recommendNoteBtn');
+  // --- 5) 수집: 반주 샘플로 로드할 후보 노트 --- //
+  function collectAccompNotes(){
+    const set = new Set();
+    for (let m = 0; m < NUM_MEASURES; m++){
+      const root = deriveRootSemitone(m);
+      const tones = chordTonesFromRootSemitone(root);
+      tones.forEach(t=>{
+        const sem = nameToSemitone(t);
+        if (sem === null) return;
+        const s = constrainToCenterC4(sem);
+        if (s !== null) set.add(semitoneToName(s));
+      });
+    }
+    return Array.from(set);
+  }
+
+  // --- 6) 반주 스케줄: 샘플 준비된 경우에만, 샘플 전용 --- //
+  function scheduleAccompanimentWithSampler(token){
+    if (!window.melodySampler || !window.samplerReady) {
+      console.log('[AI-FINAL] sampler not ready -> skip accompaniment');
+      return;
+    }
+    const secPerBeat = 60 / tempo;
+    let offsetBeats = 0;
+    for (let m=0;m<NUM_MEASURES;m++){
+      // schedule at beat offset (Transport.schedule accepts time in seconds)
+      const whenSeconds = offsetBeats * secPerBeat;
+      const measureIndex = m;
+      Tone.Transport.schedule((time)=>{
+        if (token !== playId) return;
+        // only if melody exists anywhere
+        const hasMelody = measures.some(mm => mm.some(n => n && !n.isRest && (n.pitch && n.pitch.play || n.play)));
+        if (!hasMelody) return;
+        const instrChoice = document.getElementById('accompInstrSelect') ? document.getElementById('accompInstrSelect').value : 'none';
+        if (!instrChoice || instrChoice === 'none') return;
+        const pat = document.getElementById('accompPattern') ? document.getElementById('accompPattern').value : 'arpeggio';
+        const root = deriveRootSemitone(measureIndex);
+        const tones = chordTonesFromRootSemitone(root).map(t=>{
+          const sem = nameToSemitone(t);
+          const s2 = constrainToCenterC4(sem);
+          return s2!==null ? semitoneToName(s2) : t;
+        });
+        if (tones.length === 0) return;
+        const sec = 60 / (parseInt(document.getElementById('tempoInput').value) || tempo);
+        if (pat === 'arpeggio'){
+          for (let i=0;i<4;i++){
+            const note = tones[i % tones.length];
+            const dur = sec * 0.95;
+            try{ window.melodySampler.triggerAttackRelease(note, dur, time + i*sec); }catch(e){ console.warn('[AI-FINAL] sampler trig fail', e); }
+          }
+        } else if (pat === 'strum'){
+          [0,2].forEach(b=>{
+            tones.forEach((note, idx)=>{
+              try{ window.melodySampler.triggerAttackRelease(note, sec*1.6, time + b*sec + idx*0.04); }catch(e){}
+            });
+          });
+        } else {
+          tones.forEach(note=>{ try{ window.melodySampler.triggerAttackRelease(note, sec*1.9, time); }catch(e){} });
+        }
+      }, whenSeconds);
+      // compute duration in beats for this measure
+      const sumBeats = (measures[m] || []).reduce((s,n)=>s + (n.beats || 0), 0);
+      const durBeats = sumBeats > 0 ? sumBeats : BEATS_PER_MEASURE;
+      offsetBeats += durBeats;
+    }
+    console.log('[AI-FINAL] accompaniment scheduled (sample-only)');
+  }
+
+  // --- 7) startPlayback 래핑: 샘플 준비되면 accompaniment 스케줄, 아니면 반주 없음 --- //
+  const prevStartPlayback = window.startPlayback;
+  window.startPlayback = async function(){
+    try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('[AI-FINAL] Tone.start failed', e); flashError('오디오를 시작하려면 Play를 클릭하세요.'); return; }
+    const token = ++playId;
+    // detect melody presence (generous)
+    const hasMelody = measures.some(m => m.some(n => n && !n.isRest && ((n.pitch && n.pitch.play) || n.play || n.duration)));
+    const accomChoice = document.getElementById('accompInstrSelect') ? document.getElementById('accompInstrSelect').value : 'none';
+    // if accompaniment selected AND melody exists -> try to load samples for chord tones
+    if (accomChoice && accomChoice !== 'none' && hasMelody){
+      const notesToLoad = collectAccompNotes();
+      if (notesToLoad.length === 0){
+        console.log('[AI-FINAL] no accomp notes found -> melody only');
+        if (typeof prevStartPlayback === 'function') prevStartPlayback();
+        return;
+      }
+      // map accompChoice to soundfont instrument key
+      const sfInstr = accompChoice in instrMap ? accompChoice : 'acoustic_grand_piano';
+      try{
+        const p = loadSamplerForInstrument(sfInstr, notesToLoad);
+        const timeout = new Promise(res => setTimeout(res, 3000));
+        await Promise.race([p, timeout]);
+      }catch(e){ console.warn('[AI-FINAL] loadSampler promise fail', e); }
+      // if sampler ready -> schedule melody and accompaniment
+      if (window.samplerReady && window.melodySampler){
+        if (typeof prevStartPlayback === 'function') prevStartPlayback();
+        scheduleAccompanimentWithSampler(token);
+      } else {
+        // sampler didn't load in time or failed -> play melody only (no synth fallback)
+        console.log('[AI-FINAL] sampler not ready -> play melody only');
+        if (typeof prevStartPlayback === 'function') prevStartPlayback();
+      }
+    } else {
+      // accompaniment not requested or no melody -> just play melody
+      if (typeof prevStartPlayback === 'function') prevStartPlayback();
+    }
+  };
+
+  // --- 8) 추천 개선: 추천 음표 1개만 / 추천 멜로디는 한 마디만 & 남은 박자만 --- //
+  function pickAvoidRepeat(cands, banned){
+    if(!cands || cands.length === 0) return null;
+    const f = cands.filter(c=>c !== banned);
+    const pool = f.length ? f : cands;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  // helper to create display object from note name like C4
+  function makeDisplayFromName(name){
+    const m = String(name).match(/^([A-G])(#?)(\\d)$/);
+    if (!m) return scales['C'][Math.floor(scales['C'].length/2)].display;
+    return { s: m[1].toLowerCase(), a: (m[2] === '#' ? '#' : ''), o: parseInt(m[3],10) };
+  }
+
+  // override recommendNote
+  (function replaceRecommendNote(){
+    const old = document.getElementById('recommendNoteBtn');
+    if (!old) return;
+    const newBtn = old.cloneNode(true);
+    old.parentNode.replaceChild(newBtn, old);
     newBtn.addEventListener('click', ()=>{
-      // find first measure with space (do not skip measures)
+      // find first incomplete measure
       const idx = measures.findIndex(m => m.reduce((s,n)=>s + (n.beats || 0), 0) < BEATS_PER_MEASURE);
       if (idx < 0){ flashError('모든 마디가 채워졌습니다'); return; }
-      // determine previous last melodic pitch (previous measure)
+      // ensure previous are full (no skipping)
+      for (let i=0;i<idx;i++){
+        const s = measures[i].reduce((a,n)=>a + (n.beats || 0), 0);
+        if (s < BEATS_PER_MEASURE){ flashError(`먼저 ${i+1}마디를 모두 채워주세요.`); return; }
+      }
+      // determine last pitch to avoid immediate repeat
       let lastPitch = null;
       for (let m = idx-1; m >= 0; m--){
         const arr = measures[m] || [];
@@ -1017,62 +983,56 @@ window.addEventListener('resize', ()=>{ clearTimeout(window._rT); window._rT = s
         }
         if (lastPitch) break;
       }
-      // derive chord tones for this measure
+      // chord tones for this measure
       const root = deriveRootSemitone(idx);
       const chord = chordTonesFromRootSemitone(root);
-      // map chord tones to mid-range candidates
-      const candidates = chord.map(t => {
+      const candidates = chord.map(t=>{
         const sem = nameToSemitone(t);
-        const s2 = constrainToMidRange(sem);
-        return s2 !== null ? semitoneToName(s2) : t;
+        const c = constrainToCenterC4(sem);
+        return c !== null ? semitoneToName(c) : t;
       });
-      // 18% chance to insert a rest
+      // small chance for rest
       if (Math.random() < 0.18){
         selectedIsRest = true; selectedDur = 'q'; setActiveButtons();
         addNoteToMeasure(idx, null, 'q', true);
         return;
       }
-      const chosen = pickNonRepeating(candidates, lastPitch) || candidates[0];
-      // convert to display object
-      const m = chosen.match(/^([A-G])(#?)(\d)$/);
-      const display = m ? { s: m[1].toLowerCase(), a: (m[2]==='#'?'#':''), o: parseInt(m[3],10) } : scales['C'][Math.floor(scales['C'].length/2)].display;
+      const chosen = pickAvoidRepeat(candidates, lastPitch) || candidates[0];
+      const display = makeDisplayFromName(chosen);
       selectedIsRest = false; selectedDur = 'q'; setActiveButtons();
       addNoteToMeasure(idx, { display, play: chosen }, 'q', false);
     });
-  }
+  })();
 
-  // override recommendMelodyBtn behavior
-  const rmBtn = document.getElementById('recommendMelodyBtn');
-  if (rmBtn){
-    rmBtn.replaceWith(rmBtn.cloneNode(true));
-    const newBtn2 = document.getElementById('recommendMelodyBtn');
-    newBtn2.addEventListener('click', ()=>{
-      // find first measure with space (do not skip)
+  // override recommendMelody
+  (function replaceRecommendMelody(){
+    const old = document.getElementById('recommendMelodyBtn');
+    if (!old) return;
+    const newBtn = old.cloneNode(true);
+    old.parentNode.replaceChild(newBtn, old);
+    newBtn.addEventListener('click', ()=>{
+      // find first incomplete measure
       const idx = measures.findIndex(m => m.reduce((s,n)=>s + (n.beats || 0), 0) < BEATS_PER_MEASURE);
       if (idx < 0){ flashError('추천할 빈 마디가 없습니다'); return; }
-      // ensure previous measures are full
       for (let i=0;i<idx;i++){
         const s = measures[i].reduce((a,n)=>a + (n.beats || 0), 0);
         if (s < BEATS_PER_MEASURE){ flashError(`먼저 ${i+1}마디를 모두 채워주세요.`); return; }
       }
-      // prepare rhythmic pattern: if measure partially filled, only fill remaining beats
-      const remainingBeats = BEATS_PER_MEASURE - measures[idx].reduce((a,n)=>a + (n.beats || 0), 0);
-      if (remainingBeats <= 0){ flashError('현재 마디는 이미 채워져 있습니다.'); return; }
-      // choose a rhythmic template that fits remainingBeats (simple greedy)
-      const templates = [['q','q','q','q'], ['h','q','q'], ['q','q','h'], ['q','8','8','q']];
-      let pat = templates.find(p => p.reduce((s,d) => s + (d==='h'?2:(d==='w'?4:(d==='8'?0.5:1))), 0) === remainingBeats);
-      if (!pat){
-        // fallback: split remainingBeats into quarters/halves
-        if (remainingBeats === 3) pat = ['h','q'];
-        else if (remainingBeats === 2) pat = ['h'];
-        else if (remainingBeats === 1.5) pat = ['q','8']; // unlikely
-        else pat = ['q']; // minimal
-      }
-      // generate melodic notes for the slots in pat
+      const remaining = BEATS_PER_MEASURE - measures[idx].reduce((a,n)=>a + (n.beats || 0), 0);
+      if (remaining <= 0){ flashError('현재 마디는 이미 채워져 있습니다.'); return; }
+      // pick a rhythmic template that fits remaining (prefer simple)
+      const templates = {
+        4: [['q','q','q','q'], ['h','q','q'], ['q','q','h'], ['q','8','8','q']],
+        3: [['h','q'], ['q','q','q']],
+        2: [['h'], ['q','q']],
+        1: [['q']],
+        0.5: [['8']],
+      };
+      let pat = templates[remaining] ? templates[remaining][0] : templates[4][0];
       // derive chord tones
       const root = deriveRootSemitone(idx);
       const chord = chordTonesFromRootSemitone(root);
-      // determine last pitch to avoid immediate repeat
+      // last pitch to avoid immediate repeat
       let lastPitch = null;
       for (let m = idx-1; m>=0; m--){
         const arr = measures[m] || [];
@@ -1084,57 +1044,51 @@ window.addEventListener('resize', ()=>{ clearTimeout(window._rT); window._rT = s
         }
         if (lastPitch) break;
       }
-      // clear only the remaining slots (we will append to existing measures[idx])
-      // generate sequentially
+      // append notes to fill remaining beats
       for (const d of pat){
-        // small chance of rest
+        if (remaining <= 0) break;
+        // maybe rest
         if (Math.random() < 0.18){
           addNoteToMeasure(idx, null, d, true);
           continue;
         }
-        // pick chord tone non-repeating, then maybe convert to passing tone with probability
-        // make candidates in mid-range
-        const candidates = chord.map(t => {
+        const candidates = chord.map(t=>{
           const sem = nameToSemitone(t);
-          const s2 = constrainToMidRange(sem);
-          return s2 !== null ? semitoneToName(s2) : t;
+          const c = constrainToCenterC4(sem);
+          return c !== null ? semitoneToName(c) : t;
         });
-        let chosen = pickNonRepeating(candidates, lastPitch) || candidates[0];
-        // with small probability, use a passing tone adjacent by +/-1 or 2 semitones
+        let chosen = pickAvoidRepeat(candidates, lastPitch) || candidates[0];
+        // occasionally use passing tone +/-1 semitone
         if (Math.random() < 0.28){
           const sem = nameToSemitone(chosen);
           if (sem !== null){
             const step = (Math.random() < 0.5) ? -1 : 1;
-            const pass = sem + step;
-            const constrained = constrainToMidRange(pass);
-            if (constrained !== null) chosen = semitoneToName(constrained);
+            const p = constrainToCenterC4(sem + step);
+            if (p !== null) chosen = semitoneToName(p);
           }
         }
-        // avoid large leaps: if lastPitch exists, ensure interval <= 7 semitones; otherwise adjust toward lastPitch
+        // avoid large leaps relative to lastPitch
         if (lastPitch){
           const lpSem = nameToSemitone(lastPitch);
           const chSem = nameToSemitone(chosen);
           if (lpSem !== null && chSem !== null){
             const diff = chSem - lpSem;
             if (Math.abs(diff) > 7){
-              // bring it closer: move within +/-5 semitones relative to lastPitch
               const dir = diff > 0 ? 1 : -1;
               const newSem = lpSem + dir * 5;
-              chosen = semitoneToName(constrainToMidRange(newSem));
+              chosen = semitoneToName(constrainToCenterC4(newSem));
             }
           }
         }
-        const mm = chosen.match(/^([A-G])(#?)(\d)$/);
-        const display = mm ? { s: mm[1].toLowerCase(), a: (mm[2]==='#'?'#':''), o: parseInt(mm[3],10) } : scales['C'][Math.floor(scales['C'].length/2)].display;
+        const display = makeDisplayFromName(chosen);
         addNoteToMeasure(idx, { display, play: chosen }, d, false);
         lastPitch = chosen;
       }
-      // done; addNoteToMeasure calls renderAll/autosave internally
     });
-  }
+  })();
 
-  console.log('[AI-B] Patch installed (mid-range B rules)');
-})();
+  console.log('[AI-FINAL] patch installed');
+})(); 
 </script>
 
 </body>
