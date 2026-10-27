@@ -34,26 +34,20 @@ button.danger{background:#ef4444;color:#fff;border:0}
 .small{font-size:13px;color:#556}
 </style>
 
-<!-- 안정적 VexFlow v4 CDN -->
+<!-- VexFlow v4 loader -->
 <script>
   (function(){
     if (window.Vex && window.Vex.Flow){ window.__vex_ready = true; return; }
     window.__vex_ready = false;
     function load(url){ return new Promise((res,rej)=>{ var s=document.createElement('script'); s.src=url; s.async=true; s.onload=()=>res(url); s.onerror=()=>rej(url); document.head.appendChild(s); }); }
     (async function(){
-      const urls = [
-        'https://unpkg.com/vexflow@4.2.3/releases/vexflow-min.js',
-        'https://cdn.jsdelivr.net/npm/vexflow@4.2.3/releases/vexflow-min.js'
-      ];
-      for (const u of urls){
-        try{ await load(u); if (window.Vex && window.Vex.Flow){ window.__vex_ready = true; console.info('VexFlow loaded', u); break; } }catch(e){ console.warn('VexFlow load fail', u); }
-      }
+      const urls=['https://unpkg.com/vexflow@4.2.3/releases/vexflow-min.js','https://cdn.jsdelivr.net/npm/vexflow@4.2.3/releases/vexflow-min.js'];
+      for (const u of urls){ try{ await load(u); if (window.Vex && window.Vex.Flow){ window.__vex_ready = true; console.info('VexFlow loaded', u); break; } }catch(e){ console.warn('VexFlow load fail', u); } }
       if (!window.__vex_ready) console.error('VexFlow failed to load from CDNs.');
     })();
   })();
 </script>
 
-<!-- Tone + Midi -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
 </head>
@@ -145,50 +139,48 @@ button.danger{background:#ef4444;color:#fff;border:0}
     </div>
   </div>
 
-  <div id="status" class="status loading">로딩 중... 오선(악보)이 보이면 준비된 것입니다. Play 또는 버튼 클릭으로 오디오 허용을 해 주세요.</div>
+  <div id="status" class="status loading">로딩 중... 잠시만 기다려 주세요.</div>
 
   <div id="score-container"></div>
 </div>
 
 <script>
-/* 적용사항:
- - piano: chord per beat (triad), gentle arpeggio feel
- - drum: lowered volume + ducking when melody plays
- - playback: stop at last measure that contains notes
- - solfeggio octave default 4, allowed range 3..5
- - drag limiting (MAX_DRAG_DELTA = 2)
-*/
+/* Fixed: single scales definition (no duplicate). Other accomp/drum/ducking/last-measure playback logic kept. */
 (async function(){
-  // wait for VexFlow
-  const waitForVex = async(timeout=6000)=>{
-    const s=Date.now();
-    while(Date.now()-s<timeout){ if (window.Vex && window.Vex.Flow) return true; await new Promise(r=>setTimeout(r,100)); }
+  const waitForVex = async (timeout = 6000) => {
+    const s = Date.now();
+    while (Date.now() - s < timeout) {
+      if (window.Vex && window.Vex.Flow) return true;
+      await new Promise(r=>setTimeout(r,100));
+    }
     return !!(window.Vex && window.Vex.Flow);
   };
-  if (!await waitForVex(8000)){ document.getElementById('status').textContent='VexFlow 로드 실패'; document.getElementById('status').className='status err'; return; }
+  if (!await waitForVex(8000)){
+    document.getElementById('status').textContent = '악보 엔진(VexFlow) 로드 실패 — 네트워크 확인';
+    document.getElementById('status').className = 'status err';
+    return;
+  }
 
-  // Config
+  // config & state
   const NUM_MEASURES = 8;
   const BEATS_PER_MEASURE = 4;
   const beatValue = { w:4, h:2, q:1, '8':0.5 };
   let tempo = 100;
   let currentOctave = 4;
   const MIN_OCTAVE = 3, MAX_OCTAVE = 5;
-  const MAX_DRAG_DELTA = 2; // limit big jumps when dragging
+  const MAX_DRAG_DELTA = 2;
 
   const measures = Array.from({length:NUM_MEASURES}, ()=>[]);
   const history = [];
   const SF_BASE = 'https://gleitz.github.io/midi-js-soundfonts/FluidR3_GM/';
   const instrMap = { acoustic_grand_piano:'acoustic_grand_piano', flute:'flute', acoustic_guitar_nylon:'acoustic_guitar_nylon', electric_guitar_clean:'electric_guitar_clean', violin:'violin', xylophone:'xylophone' };
 
-  // Audio
+  // audio setup
   let synthPrimary = null, melodySampler = null, samplerReady = false;
-  // accompaniment gain + drum gain
   const accompGain = new Tone.Gain(0.35).toDestination();
-  const drumGain = new Tone.Gain(0.14).toDestination(); // lower than accomp
+  const drumGain = new Tone.Gain(0.14).toDestination();
   let accompSampler = null, accompReady = false;
 
-  // synthetic drum fallback connected to drumGain
   const kickSynth = new Tone.MembraneSynth({ pitchDecay:0.01, octaves:2, envelope:{ attack:0.001, decay:0.6, sustain:0.01, release:0.1 } }).connect(drumGain);
   const snareSynth = new Tone.NoiseSynth({ noise:{ type:'white' }, envelope:{ attack:0.001, decay:0.18, sustain:0 } }).connect(drumGain);
   const hhSynth = new Tone.MetalSynth({ frequency:700, envelope:{ attack:0.001, decay:0.08, release:0.01 }, harmonicity:5.1 }).connect(drumGain);
@@ -196,12 +188,11 @@ button.danger{background:#ef4444;color:#fff;border:0}
   function setStatus(text, cls='ok'){ const s=document.getElementById('status'); s.textContent=text; s.className='status '+cls; }
   function flashError(msg){ const s=document.getElementById('status'); s.textContent=msg; s.className='status err'; setTimeout(()=>setStatus('작성 계속하세요!','ok'),2200); }
 
-  function initSynth(){ try{ if (synthPrimary) synthPrimary.dispose(); }catch(e){} synthPrimary = new Tone.PolySynth(Tone.Synth, { maxPolyphony:8 }).toDestination(); synthPrimary.set({ voice:{ envelope:{ attack:0.01, decay:0.1, sustain:0.9, release:0.2 } } }); setStatus('합성기 준비됨','ok'); }
+  function initSynth(){ try{ if (synthPrimary) synthPrimary.dispose(); }catch(e){} synthPrimary = new Tone.PolySynth(Tone.Synth,{maxPolyphony:8}).toDestination(); synthPrimary.set({ voice:{ envelope:{ attack:0.01, decay:0.1, sustain:0.9, release:0.2 } } }); setStatus('합성기 준비됨','ok'); }
   initSynth();
 
-  // ducking: lower drumGain briefly when melody plays
-  const DRUM_NORMAL = 0.14;
-  const DRUM_DUCK = 0.05;
+  // ducking
+  const DRUM_NORMAL = 0.14, DRUM_DUCK = 0.05;
   function duckDrums(durationSec){
     try{
       drumGain.gain.cancelScheduledValues(Tone.now());
@@ -212,7 +203,6 @@ button.danger{background:#ef4444;color:#fff;border:0}
   }
 
   function playMelodyNote(name, dur, at){
-    // duck drums slightly so melody isn't buried
     duckDrums(dur);
     try{
       if (samplerReady && melodySampler) melodySampler.triggerAttackRelease(name, dur, at);
@@ -221,9 +211,8 @@ button.danger{background:#ef4444;color:#fff;border:0}
   }
   window.playMelodyNote = playMelodyNote;
 
-  // VexFlow render
   const VF = window.Vex.Flow;
-  function noteToVexKey(note){ if (!note) return 'b/4'; const d=note.display; const acc=(d.a==='#')?'#':(d.a==='b'?'b':''); return d.s+acc+'/'+d.o; }
+  function noteToVexKey(note){ if (!note) return 'b/4'; const d = note.display; const acc = (d.a === '#')? '#': (d.a === 'b' ? 'b' : ''); return d.s + acc + '/' + d.o; }
 
   let isPointerDown = false;
 
@@ -269,10 +258,9 @@ button.danger{background:#ef4444;color:#fff;border:0}
         else { const placeholder=[ new VF.StaveNote({ clef:'treble', keys:['b/4'], duration:'wr' }) ]; const v2=new VF.Voice({num_beats:4,beat_value:4}); v2.setStrict(false); v2.addTickables(placeholder); new VF.Formatter().joinVoices([v2]).format([v2], availableWidth); v2.draw(ctx, stave); }
       }catch(e){ console.error(e); setStatus('악보 렌더 오류','err'); }
 
-      // pointer events
+      // pointer handlers...
       div.addEventListener('pointerdown', async function(ev){
-        ev.preventDefault();
-        try{ this.setPointerCapture(ev.pointerId); }catch(e){}
+        ev.preventDefault(); try{ this.setPointerCapture(ev.pointerId); }catch(e){}
         for (let p=0;p<i;p++){ const sum=measures[p].reduce((s,n)=>s+n.beats,0); if (sum < BEATS_PER_MEASURE){ flashError((p+1)+'마디를 먼저 채워주세요.'); try{ this.releasePointerCapture(ev.pointerId);}catch(e){} return; } }
         isPointerDown = true;
         try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('Tone.start failed', e); }
@@ -283,32 +271,25 @@ button.danger{background:#ef4444;color:#fff;border:0}
       div.addEventListener('pointermove', function(ev){
         if (!isPointerDown) return;
         const start=this._pointerStart; if (!start) return;
-        const rect=start.rect;
-        const dx = (ev.clientX - (rect.left + start.x)); const dy = (ev.clientY - (rect.top + start.y));
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        if (!this._draggingStarted && dist > 6){
-          if (measures[i].length > 0){
-            const slotW = rect.width / measures[i].length; const px = ev.clientX - rect.left;
-            let nearestIdx = Math.floor(px / slotW); nearestIdx = Math.max(0, Math.min(measures[i].length-1, nearestIdx));
+        const rect=start.rect; const dx=(ev.clientX-(rect.left+start.x)); const dy=(ev.clientY-(rect.top+start.y)); const dist=Math.sqrt(dx*dx+dy*dy);
+        if (!this._draggingStarted && dist>6){
+          if (measures[i].length>0){
+            const slotW = rect.width/measures[i].length; const px = ev.clientX - rect.left;
+            let nearestIdx = Math.floor(px / slotW); nearestIdx=Math.max(0, Math.min(measures[i].length-1, nearestIdx));
             this._draggingStarted = { noteIdx: nearestIdx, fromPitch: measures[i][nearestIdx].isRest ? null : measures[i][nearestIdx].pitch };
             this.parentElement.classList.add('dragging');
           }
         }
         if (this._draggingStarted){
           const rect2=this.getBoundingClientRect(); const y = ev.clientY - rect2.top;
-          const scale = scales[document.getElementById('keySelect').value];
+          const scale = window.scales[document.getElementById('keySelect').value];
           let slot = Math.floor(((y - 30) / (rect2.height - 40)) * scale.length);
           slot = Math.max(0, Math.min(scale.length-1, slot));
-          const noteObj = scale[slot];
           const n = measures[i][this._draggingStarted.noteIdx];
           if (!n || n.isRest) return;
-          // limit big jumps relative to previous pitch location
           const prevIdx = scale.findIndex(s=>s.play === n.pitch.play);
-          const targetIdx = slot;
-          let finalIdx = targetIdx;
-          if (prevIdx >= 0 && Math.abs(targetIdx - prevIdx) > MAX_DRAG_DELTA){
-            finalIdx = prevIdx + Math.sign(targetIdx - prevIdx) * MAX_DRAG_DELTA;
-          }
+          let finalIdx = slot;
+          if (prevIdx >= 0 && Math.abs(slot - prevIdx) > MAX_DRAG_DELTA) finalIdx = prevIdx + Math.sign(slot - prevIdx) * MAX_DRAG_DELTA;
           const finalNote = scale[finalIdx];
           if (!finalNote) return;
           if (n.pitch.play !== finalNote.play){
@@ -318,30 +299,9 @@ button.danger{background:#ef4444;color:#fff;border:0}
         }
       }, { passive:false });
 
-      div.addEventListener('pointerup', function(ev){
-        try{ this.releasePointerCapture(ev.pointerId); }catch(e){}
-        isPointerDown = false;
-        if (this._draggingStarted){
-          this.parentElement.classList.remove('dragging');
-          this._draggingStarted = null;
-          this._pointerStart = null;
-          history.push({ type:'move', measure:i });
-          renderAll(); return;
-        }
-        const start = this._pointerStart;
-        if (start){
-          const rect2 = start.rect;
-          const y = ev.clientY - rect2.top;
-          const scale = scales[document.getElementById('keySelect').value];
-          let slot = Math.floor(((y - 30) / (rect2.height - 40)) * scale.length);
-          slot = Math.max(0, Math.min(scale.length-1, slot));
-          const noteObj = scale[slot];
-          addNoteToMeasure(i, noteObj, selectedDur, selectedIsRest);
-          this._pointerStart = null;
-        }
-      }, { passive:false });
+      div.addEventListener('pointerup', function(ev){ try{ this.releasePointerCapture(ev.pointerId);}catch(e){} isPointerDown=false; if (this._draggingStarted){ this.parentElement.classList.remove('dragging'); this._draggingStarted=null; this._pointerStart=null; history.push({type:'move',measure:i}); renderAll(); return; } const start=this._pointerStart; if (start){ const rect2=start.rect; const y=ev.clientY-rect2.top; const scale = window.scales[document.getElementById('keySelect').value]; let slot=Math.floor(((y-30)/(rect2.height-40))*scale.length); slot=Math.max(0,Math.min(scale.length-1,slot)); const noteObj=scale[slot]; addNoteToMeasure(i,noteObj,selectedDur,selectedIsRest); this._pointerStart=null; } }, { passive:false });
 
-      div.addEventListener('pointercancel', function(ev){ try{ this.releasePointerCapture(ev.pointerId); }catch(e){} isPointerDown=false; this._pointerStart=null; this._draggingStarted=null; }, { passive:false });
+      div.addEventListener('pointercancel', function(ev){ try{ this.releasePointerCapture(ev.pointerId);}catch(e){} isPointerDown=false; this._pointerStart=null; this._draggingStarted=null; }, { passive:false });
 
     }
   }
@@ -350,56 +310,44 @@ button.danger{background:#ef4444;color:#fff;border:0}
   // addNoteToMeasure
   function addNoteToMeasure(measureIdx, scaleNoteObj, durKey, isRest){
     if (measureIdx<0||measureIdx>=NUM_MEASURES) return false;
-    const beats = beatValue[durKey];
-    const sum = measures[measureIdx].reduce((s,n)=>s+n.beats,0);
+    const beats = beatValue[durKey]; const sum = measures[measureIdx].reduce((s,n)=>s+n.beats,0);
     if (sum + beats > BEATS_PER_MEASURE){ flashError((measureIdx+1)+'마디 박자 초과'); return false; }
     const stored = isRest ? { pitch:null, duration:durKey, beats:beats, isRest:true } : { pitch:{ display: scaleNoteObj.display, play: scaleNoteObj.play }, duration:durKey, beats:beats, isRest:false };
     measures[measureIdx].push(stored);
     history.push({ type:'add', measure: measureIdx });
     if (!isRest){ const durSec = beats * (60/tempo); playMelodyNote(stored.pitch.play, durSec, Tone.now()); }
-    try{ localStorage.setItem('composer_autosave_accomp_v3', JSON.stringify({ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value) })); }catch(e){}
-    renderAll();
-    return true;
+    try{ localStorage.setItem('composer_autosave_fixed', JSON.stringify({ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value) })); }catch(e){}
+    renderAll(); return true;
   }
   window.addNoteToMeasure = addNoteToMeasure;
 
-  function clearMeasure(idx){ if (measures[idx].length===0) return; if (!confirm((idx+1)+'마디를 지우시겠습니까?')) return; const prev = JSON.parse(JSON.stringify(measures[idx])); measures[idx]=[]; history.push({ type:'clear', measure: idx, prev: prev }); renderAll(); }
+  function clearMeasure(idx){ if (measures[idx].length===0) return; if (!confirm((idx+1)+'마디를 지우시겠습니까?')) return; const prev=JSON.parse(JSON.stringify(measures[idx])); measures[idx]=[]; history.push({ type:'clear', measure: idx, prev: prev }); renderAll(); }
   window.clearMeasure = clearMeasure;
 
-  // scales limited to octave range MIN_OCTAVE..MAX_OCTAVE
-  const semitoneMaster = (function(){ const out=[]; const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; for (let o=MAX_OCTAVE;o>=MIN_OCTAVE;o--) for (const n of names) out.push(n+o); return out; })();
-  function buildScaleForKey(key){
-    const tonicMap={C:0,G:7,F:5};
-    const pcMap={'C':0,'C#':1,'D':2,'D#':3,'E':4,'F':5,'F#':6,'G':7,'G#':8,'A':9,'A#':10,'B':11};
-    const diatonic=[0,2,4,5,7,9,11];
-    const t = tonicMap[key];
-    const out=[];
-    for (const nm of semitoneMaster){
-      const namePart = nm.slice(0,-1); const oct = parseInt(nm.slice(-1),10); const pc = pcMap[namePart];
-      const rel = (pc - t + 12) % 12;
-      if (diatonic.indexOf(rel) >= 0){
-        let disp = namePart;
-        if (key==='F' && namePart==='A#') disp='Bb';
-        const acc = disp.length>1 ? (disp[1]==='#'?'#':'b') : '';
-        out.push({ display:{ s:disp[0].toLowerCase(), a:acc, o:oct }, play: disp + oct });
-      }
+  // build scales ONCE and expose as window.scales (no duplicate declaration)
+  (function buildScalesOnce(){
+    if (window.scales) return;
+    const MIN = MIN_OCTAVE, MAX = MAX_OCTAVE;
+    const semitoneMasterLocal = (function(){ const out=[]; const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; for (let o=MAX;o>=MIN;o--) for (const n of names) out.push(n+o); return out; })();
+    function buildForKey(key){
+      const tonicMap={C:0,G:7,F:5}; const pcMap={C:0,'C#':1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,A:9,'A#':10,B:11};
+      const diatonic=[0,2,4,5,7,9,11]; const t=tonicMap[key]; const out=[];
+      for (const nm of semitoneMasterLocal){ const namePart=nm.slice(0,-1); const oct=parseInt(nm.slice(-1),10); const pc=pcMap[namePart]; const rel=(pc-t+12)%12; if (diatonic.indexOf(rel)>=0){ let disp = namePart; if (key==='F' && namePart==='A#') disp='Bb'; const acc = disp.length>1 ? (disp[1]==='#'?'#':'b') : ''; out.push({ display:{ s:disp[0].toLowerCase(), a:acc, o:oct }, play: disp + oct }); } }
+      return out;
     }
-    return out;
-  }
-  const scales = { C: buildScaleForKey('C'), G: buildScaleForKey('G'), F: buildScaleForKey('F') };
-  window.scales = scales;
+    window.scales = { C: buildForKey('C'), G: buildForKey('G'), F: buildForKey('F') };
+  })();
 
-  // recommend: fill only remaining beats in current measure
+  // recommend helpers (fill remaining beats only)
   function beatsFor(d){ return beatValue[d] || 1; }
   function recommendNoteForCurrentMeasure(){
     const key = document.getElementById('keySelect').value;
-    const scale = scales[key];
     const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
     if (idx < 0) return null;
-    let prev = null;
-    for (let i=0;i<NUM_MEASURES;i++) if (measures[i].length>0) prev = measures[i][measures[i].length-1];
+    const scale = window.scales[key];
+    let prev = null; for (let i=0;i<NUM_MEASURES;i++) if (measures[i].length>0) prev = measures[i][measures[i].length-1];
     let baseIdx = Math.floor(scale.length/2);
-    if (prev && prev.pitch) baseIdx = scale.findIndex(s=>s.play===prev.pitch.play) >=0 ? scale.findIndex(s=>s.play===prev.pitch.play) : baseIdx;
+    if (prev && prev.pitch) { const pidx = scale.findIndex(s=>s.play===prev.pitch.play); if (pidx>=0) baseIdx = pidx; }
     const step = Math.floor(Math.random()*3)-1; let cand = Math.max(0, Math.min(scale.length-1, baseIdx+step));
     const remaining = BEATS_PER_MEASURE - measures[idx].reduce((s,n)=>s+n.beats,0);
     const durCandidates = ['w','h','q','8'].filter(d=>beatsFor(d) <= remaining);
@@ -419,7 +367,7 @@ button.danger{background:#ef4444;color:#fff;border:0}
     const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
     if (idx < 0){ flashError('추천할 빈 마디가 없습니다'); return; }
     let remaining = BEATS_PER_MEASURE - measures[idx].reduce((s,n)=>s+n.beats,0);
-    const key = document.getElementById('keySelect').value; const scale = scales[key];
+    const key = document.getElementById('keySelect').value; const scale = window.scales[key];
     let cur = Math.floor(scale.length/2);
     while (remaining > 0){
       const possible = ['h','q','8','w'].filter(d=>beatsFor(d) <= remaining).sort((a,b)=>beatsFor(b)-beatsFor(a));
@@ -431,17 +379,18 @@ button.danger{background:#ef4444;color:#fff;border:0}
     setStatus('추천 멜로디 적용','ok');
   });
 
-  // solfeggio buttons and octave controls
+  // solfeggio buttons with octave control fixed to range
   document.querySelectorAll('.solfeggio button[data-solf]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       try{ await Tone.start(); if (Tone.context && Tone.context.state==='suspended') await Tone.context.resume(); }catch(e){}
       const map = { do:0, re:1, mi:2, fa:3, sol:4, la:5, si:6 };
       const deg = map[btn.getAttribute('data-solf')];
       const key = document.getElementById('keySelect').value;
-      const scale = scales[key];
-      // pick degree and ensure octave within MIN..MAX
+      const scale = window.scales[key];
       const base = scale[Math.max(0, Math.min(scale.length-1, deg))];
-      const candidate = { display:{ s: base.display.s, a: base.display.a, o: currentOctave }, play: base.play.replace(/\d$/, String(currentOctave)) };
+      // enforce octave range
+      const oct = Math.max(MIN_OCTAVE, Math.min(MAX_OCTAVE, currentOctave));
+      const candidate = { display:{ s: base.display.s, a: base.display.a, o: oct }, play: base.play.replace(/\d$/, String(oct)) };
       const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
       if (idx < 0){ flashError('빈 마디가 없습니다'); return; }
       addNoteToMeasure(idx, candidate, selectedDur, false);
@@ -452,96 +401,63 @@ button.danger{background:#ef4444;color:#fff;border:0}
   document.getElementById('octDown').addEventListener('click', ()=>{ if (currentOctave > MIN_OCTAVE) currentOctave--; document.getElementById('octDisplay').textContent = currentOctave; });
 
   // durations
-  let selectedDur = 'q', selectedIsRest = false;
+  let selectedDur='q', selectedIsRest=false;
   function setActiveButtons(){ document.querySelectorAll('.dur-btn').forEach(b=>b.classList.remove('active')); const el=document.getElementById('dur_'+selectedDur); if (el) el.classList.add('active'); }
-  ['w','h','q','8'].forEach(d=>{
-    const el = document.getElementById('dur_'+d);
-    if (el) el.addEventListener('click', ()=>{ selectedIsRest=false; selectedDur=d; setActiveButtons(); });
-    const r = document.getElementById('rest_'+d);
-    if (r) r.addEventListener('click', ()=>{ selectedIsRest=true; selectedDur=d; setActiveButtons(); });
-  });
+  ['w','h','q','8'].forEach(d=>{ const el=document.getElementById('dur_'+d); if (el) el.addEventListener('click', ()=>{ selectedIsRest=false; selectedDur=d; setActiveButtons(); }); const r=document.getElementById('rest_'+d); if (r) r.addEventListener('click', ()=>{ selectedIsRest=true; selectedDur=d; setActiveButtons(); }); });
   setActiveButtons();
 
-  // Sample loaders
-  async function findSampleName(baseUrl, note){
-    const tries=[note+'.mp3', encodeURIComponent(note)+'.mp3'];
-    const sharpToFlat={'C#':'Db','D#':'Eb','F#':'Gb','G#':'Ab','A#':'Bb'};
-    const m = note.match(/^([A-G])([#b]?)(\d)$/);
-    if (m && m[2]==='#'){ const flat = sharpToFlat[m[1]+'#']; if (flat) tries.push(flat+m[3]+'.mp3', encodeURIComponent(flat+m[3])+'.mp3'); }
-    for (const fn of tries){ try{ const r = await fetch(baseUrl+fn,{method:'HEAD'}); if (r && r.status===200) return fn; }catch(e){} }
-    return null;
-  }
+  // sample and accompaniment loaders (same as prior)...
+  async function findSampleName(baseUrl, note){ const tries=[note+'.mp3', encodeURIComponent(note)+'.mp3']; const sharpToFlat={'C#':'Db','D#':'Eb','F#':'Gb','G#':'Ab','A#':'Bb'}; const m = note.match(/^([A-G])([#b]?)(\d)$/); if (m && m[2]==='#'){ const flat = sharpToFlat[m[1]+'#']; if (flat) tries.push(flat+m[3]+'.mp3', encodeURIComponent(flat+m[3])+'.mp3'); } for (const fn of tries){ try{ const r = await fetch(baseUrl+fn, { method:'HEAD' }); if (r && r.status===200) return fn; }catch(e){} } return null; }
   async function buildMapping(baseUrl, notes){ const map={}; for (const n of notes){ try{ const fn = await findSampleName(baseUrl,n); if (fn) map[n]=fn; }catch(e){ console.warn('map err', e); } } return map; }
 
   async function loadMelodySampler(instr, notes){
-    samplerReady = false;
-    if (melodySampler){ try{ melodySampler.dispose(); }catch(e){} melodySampler = null; }
-    const folder = instrMap[instr] || instr;
-    const baseUrl = SF_BASE + folder + '-mp3/';
-    try{
-      setStatus('멜로디 샘플 확인 중...', 'loading');
-      const urls = await buildMapping(baseUrl, notes);
-      if (!urls || Object.keys(urls).length===0){ setStatus('멜로디 샘플 없음(합성기 폴백)','err'); return; }
-      melodySampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ samplerReady=true; setStatus('멜로디 샘플 준비','ok'); }, onerror:(e)=>{ console.warn(e); setStatus('멜로디 샘플 오류','err'); } }).toDestination();
-    }catch(e){ console.warn(e); setStatus('멜로디 샘플 로드 실패','err'); }
+    samplerReady=false;
+    if (melodySampler){ try{ melodySampler.dispose(); }catch(e){} melodySampler=null; }
+    const folder = instrMap[instr] || instr; const baseUrl = SF_BASE + folder + '-mp3/';
+    try{ setStatus('멜로디 샘플 확인 중...','loading'); const urls = await buildMapping(baseUrl, notes); if (!urls || Object.keys(urls).length===0){ setStatus('멜로디 샘플 없음(합성기 폴백)','err'); return; } melodySampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ samplerReady=true; setStatus('멜로디 샘플 준비','ok'); }, onerror:(e)=>{ console.warn(e); setStatus('멜로디 샘플 오류','err'); } }).toDestination(); }catch(e){ console.warn(e); setStatus('멜로디 샘플 로드 실패','err'); }
   }
 
   async function loadAccompSampler(instr, notes){
-    accompReady = false;
-    if (accompSampler){ try{ accompSampler.dispose(); }catch(e){} accompSampler = null; }
-    if (instr === 'none') return;
-    const folder = instrMap[instr] || instr;
-    const baseUrl = SF_BASE + folder + '-mp3/';
-    try{
-      setStatus('반주 샘플 확인 중...','loading');
-      const urls = await buildMapping(baseUrl, notes.length>0?notes:['C4','E4','G4']);
-      if (!urls || Object.keys(urls).length===0){ setStatus('반주 샘플 없음(합성기 폴백)','err'); return; }
-      accompSampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ accompReady=true; setStatus('반주 샘플 준비','ok'); }, onerror:(e)=>{ console.warn(e); setStatus('반주 샘플 오류','err'); } });
-      accompSampler.connect(accompGain); // accompanist to accompGain (melody muted relative)
-    }catch(e){ console.warn(e); setStatus('반주 샘플 로드 실패','err'); }
+    accompReady=false;
+    if (accompSampler){ try{ accompSampler.dispose(); }catch(e){} accompSampler=null; }
+    if (instr==='none') return;
+    const folder = instrMap[instr] || instr; const baseUrl = SF_BASE + folder + '-mp3/';
+    try{ setStatus('반주 샘플 확인 중...','loading'); const urls = await buildMapping(baseUrl, notes.length>0?notes:['C4','E4','G4']); if (!urls || Object.keys(urls).length===0){ setStatus('반주 샘플 없음(합성기 폴백)','err'); return; } accompSampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ accompReady=true; setStatus('반주 샘플 준비','ok'); }, onerror:(e)=>{ console.warn(e); setStatus('반주 샘플 오류','err'); } }); accompSampler.connect(accompGain); }catch(e){ console.warn(e); setStatus('반주 샘플 로드 실패','err'); }
   }
 
-  // accompaniment: chord-based piano and gentle guitar; drums via drumGain (with duck)
+  // accompaniment scheduling (piano triads, gentle guitar, drums via drumGain)
   function scheduleAccompanimentMeasure(startTime, measureIndex){
     const type = document.getElementById('accompSelect').value;
-    if (type === 'none') return;
-    const chordRoot = chooseChordRoot(measureIndex);
-    const chord = triad(chordRoot, currentOctave); // array of 3 notes
+    if (type==='none') return;
+    const root = chooseChordRoot(measureIndex);
+    const chord = triad(root, currentOctave);
     const beatSec = 60/tempo;
-
-    if (type === 'acoustic_grand_piano'){
-      // For each beat: play triad simultaneously but slightly staggered for smoothness
+    if (type==='acoustic_grand_piano'){
       for (let b=0;b<4;b++){
         const t = startTime + b*beatSec;
+        // play triad with slight spread for natural arpeggio feel (but chordal, not single-line)
         for (let i=0;i<chord.length;i++){
-          const nt = t + i*0.02; // slight stagger
-          if (accompReady && accompSampler){
-            try{ accompSampler.triggerAttackRelease(chord[i], beatSec*0.95, nt); }catch(e){ synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt); }
-          } else {
-            synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt);
-          }
+          const nt = t + i*0.02;
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease(chord[i], beatSec*0.95, nt); }catch(e){ synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt); } } else synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt);
         }
       }
-    } else if (type === 'acoustic_guitar_nylon'){
-      // gentle strum on each beat (3 notes slightly offset)
+    } else if (type==='acoustic_guitar_nylon'){
       for (let b=0;b<4;b++){
         const t = startTime + b*beatSec;
         for (let i=0;i<chord.length;i++){
           const nt = t + i*0.03;
-          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease(chord[i], beatSec*0.95, nt); }catch(e){ synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt); } }
-          else synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt);
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease(chord[i], beatSec*0.95, nt); }catch(e){ synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt); } } else synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt);
         }
       }
-    } else if (type === 'drum_kit'){
-      // drum pattern but quieter; use accompSampler if it maps drum hits else synths
+    } else if (type==='drum_kit'){
       for (let b=0;b<4;b++){
         const t = startTime + b*beatSec;
         if (b%2===0){
-          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('C2',0.12,t); }catch(e){ kickSynth.triggerAttackRelease('C2', 0.12, t); } }
-          else kickSynth.triggerAttackRelease('C2', 0.12, t);
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('C2',0.12,t); }catch(e){ kickSynth.triggerAttackRelease('C2',0.12,t); } }
+          else kickSynth.triggerAttackRelease('C2',0.12,t);
         } else {
-          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('D2',0.12,t); }catch(e){ snareSynth.triggerAttackRelease('C4', 0.12, t); } }
-          else snareSynth.triggerAttackRelease('C4', 0.12, t);
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('D2',0.12,t); }catch(e){ snareSynth.triggerAttackRelease('C4',0.12,t); } }
+          else snareSynth.triggerAttackRelease('C4',0.12,t);
         }
         const t2 = t + beatSec/2;
         if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('G4',0.06,t); accompSampler.triggerAttackRelease('G4',0.06,t2); }catch(e){ hhSynth.triggerAttackRelease('G4',0.06,t); hhSynth.triggerAttackRelease('G4',0.06,t2); } }
@@ -550,13 +466,12 @@ button.danger{background:#ef4444;color:#fff;border:0}
     }
   }
 
-  // Playback: play up to last measure that contains notes
+  // Schedule only up to last measure that contains a non-rest note
   function scheduleAllAndStart(){
     Tone.Transport.cancel();
     const beatSec = 60/tempo;
-    // find last measure with a note
     let lastIdx = -1;
-    for (let i=NUM_MEASURES-1;i>=0;i--){ if (measures[i].some(n=>!n.isRest)) { lastIdx=i; break; } }
+    for (let i=NUM_MEASURES-1;i>=0;i--){ if (measures[i].some(n=>!n.isRest)) { lastIdx = i; break; } }
     if (lastIdx < 0){ flashError('재생할 음표가 없습니다'); return; }
     let t = Tone.now() + 0.06;
     for (let m=0;m<=lastIdx;m++){
@@ -572,19 +487,19 @@ button.danger{background:#ef4444;color:#fff;border:0}
       })(m, t);
       t += 4 * beatSec;
     }
-    // schedule end at end of lastIdx
     Tone.Transport.schedule((time)=>{ document.querySelectorAll('.measure-box').forEach(b=>b.classList.remove('active')); try{ Tone.Transport.stop(); }catch(e){} }, t - (Tone.now()+0.06));
-    try{ Tone.Transport.start(); }catch(e){ console.warn('Transport start failed', e); }
+    try{ Tone.Transport.start(); }catch(e){ console.warn('Transport start error', e); }
   }
 
-  // chord utilities
   function chooseChordRoot(mi){
     const key = document.getElementById('keySelect').value;
     const counts = {};
-    for (const n of measures[mi]) if (!n.isRest && n.pitch && n.pitch.play){ const m = n.pitch.play.match(/^([A-G][#b]?)/); const pc = m?m[0]:n.pitch.play; counts[pc] = (counts[pc]||0) + 1; }
-    if (!Object.keys(counts).length) return key;
-    const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
-    return entries[0][0];
+    for (const n of measures[mi]) if (!n.isRest && n.pitch && n.pitch.play){ const m = n.pitch.play.match(/^([A-G][#b]?)/); const pc = m?m[0]:n.pitch.play; counts[pc] = (counts[pc]||0)+1; }
+    if (!Object.keys(counts).length) {
+      // prefer chord progression 1 (tonic)
+      return key;
+    }
+    const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]); return entries[0][0];
   }
   function triad(root, oct){
     const semis = { C:0,'C#':1,Db:1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,Ab:8,A:9,'A#':10,Bb:10,B:11 };
@@ -592,56 +507,29 @@ button.danger{background:#ef4444;color:#fff;border:0}
     const mapping = { Bb:'A#' }; const r = mapping[root] || root; const idx = semis[r]!==undefined?semis[r]:0; const third=(idx+4)%12; const fifth=(idx+7)%12; return [ findName(idx)+oct, findName(third)+oct, findName(fifth)+oct ];
   }
 
-  // Setup UI bindings for recommend/solfeggio/play etc.
+  // UI bindings
   document.getElementById('playBtn').addEventListener('click', async ()=>{
-    try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('Tone.start failed', e); }
-    tempo = parseInt(document.getElementById('tempoInput').value)||100;
-    // prepare samplers
+    try{ await Tone.start(); if (Tone.context && Tone.context.state==='suspended') await Tone.context.resume(); }catch(e){ console.warn('Tone.start failed', e); }
+    tempo = parseInt(document.getElementById('tempoInput').value) || 100;
     const uniq = new Set(); for (const m of measures) for (const n of m) if (!n.isRest && n.pitch && n.pitch.play) uniq.add(n.pitch.play);
-    const used = Array.from(uniq);
-    const instr = document.getElementById('instrSelect').value; if (used.length>0) loadMelodySampler(instr, used);
+    const used = Array.from(uniq); const instr = document.getElementById('instrSelect').value; if (used.length>0) loadMelodySampler(instr, used);
     const accomp = document.getElementById('accompSelect').value; if (accomp !== 'none') loadAccompSampler(accomp, used);
     scheduleAllAndStart();
   });
+  document.getElementById('stopBtn').addEventListener('click', ()=>{ try{ Tone.Transport.stop(); Tone.Transport.cancel(); }catch(e){} try{ if (synthPrimary){ synthPrimary.releaseAll(); synthPrimary.dispose(); } }catch(e){} initSynth(); setStatus('정지','ok'); });
 
-  document.getElementById('stopBtn').addEventListener('click', ()=>{
-    try{ Tone.Transport.stop(); Tone.Transport.cancel(); }catch(e){}
-    try{ if (synthPrimary){ synthPrimary.releaseAll(); synthPrimary.dispose(); } }catch(e){}
-    initSynth(); setStatus('정지','ok');
-  });
-
-  // save/load/export (same as before)
-  document.getElementById('saveJsonBtn').addEventListener('click', ()=>{
-    try{ const obj={ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value)||100 }; const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='활동내용.json'; a.click(); URL.revokeObjectURL(url); }catch(e){ console.warn(e); flashError('저장 실패'); }
-  });
+  // recommend/solfeggio bindings already above
+  // save/load/export
+  document.getElementById('saveJsonBtn').addEventListener('click', ()=>{ try{ const obj={ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value)||100 }; const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='활동내용.json'; a.click(); URL.revokeObjectURL(url); }catch(e){ console.warn(e); flashError('저장 실패'); } });
   document.getElementById('loadJsonBtn').addEventListener('click', ()=> document.getElementById('fileInput').click());
   document.getElementById('fileInput').addEventListener('change', ev=>{ const f=ev.target.files[0]; if (!f) return; const r=new FileReader(); r.onload=()=>{ try{ const obj=JSON.parse(r.result); if (!obj.measures) throw 'invalid'; for (let i=0;i<NUM_MEASURES && i<obj.measures.length;i++) measures[i]=obj.measures[i]; if (obj.key) document.getElementById('keySelect').value=obj.key; if (obj.tempo) document.getElementById('tempoInput').value=obj.tempo; renderAll(); setStatus('불러오기 완료','ok'); }catch(e){ alert('불러오기 실패'); } }; r.readAsText(f); ev.target.value=''; });
 
-  document.getElementById('exportMidiBtn').addEventListener('click', ()=>{
-    try{ const midi=new Midi(); const track=midi.addTrack(); const tempoVal=parseInt(document.getElementById('tempoInput').value)||100; midi.header.setTempo(tempoVal); let time=0; const secPerBeat=60/tempoVal;
-      for (let m=0;m<NUM_MEASURES;m++){ for (const n of measures[m]){ const dur=n.beats*secPerBeat; if (!n.isRest) track.addNote({ name:n.pitch.play, time:time, duration:dur, velocity:0.9 }); time+=dur; } }
-      const midArray=midi.toArray(); const blob=new Blob([midArray],{type:'audio/midi'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='나의_음악.mid'; a.click(); URL.revokeObjectURL(url); setStatus('MIDI 생성 완료','ok');
-    }catch(e){ console.warn(e); flashError('MIDI 생성 실패'); }
-  });
+  document.getElementById('exportMidiBtn').addEventListener('click', ()=>{ try{ const midi=new Midi(); const track=midi.addTrack(); const tempoVal=parseInt(document.getElementById('tempoInput').value)||100; midi.header.setTempo(tempoVal); let time=0; const secPerBeat=60/tempoVal; for (let m=0;m<NUM_MEASURES;m++){ for (const n of measures[m]){ const dur=n.beats*secPerBeat; if (!n.isRest) track.addNote({ name:n.pitch.play, time:time, duration:dur, velocity:0.9 }); time+=dur; } } const midArr=midi.toArray(); const blob=new Blob([midArr],{type:'audio/midi'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='나의_음악.mid'; a.click(); URL.revokeObjectURL(url); setStatus('MIDI 생성 완료','ok'); }catch(e){ console.warn(e); flashError('MIDI 생성 실패'); } });
 
-  // Scale builder (limited to MIN..MAX octaves)
-  function buildScaleForKeyLimited(key){
-    const semitoneMasterLocal = (function(){ const out=[]; const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; for (let o=MAX_OCTAVE;o>=MIN_OCTAVE;o--) for (const n of names) out.push(n+o); return out; })();
-    const tonicMap={C:0,G:7,F:5};
-    const pcMap={C:0,'C#':1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,A:9,'A#':10,B:11};
-    const diatonic=[0,2,4,5,7,9,11]; const t=tonicMap[key]; const out=[];
-    for (const nm of semitoneMasterLocal){ const namePart=nm.slice(0,-1); const oct=parseInt(nm.slice(-1),10); const pc=pcMap[namePart]; const rel=(pc-t+12)%12; if (diatonic.indexOf(rel)>=0){ let disp=namePart; if (key==='F' && namePart==='A#') disp='Bb'; const acc = disp.length>1 ? (disp[1]==='#'?'#':'b') : ''; out.push({ display:{ s:disp[0].toLowerCase(), a:acc, o:oct }, play: disp+oct }); } }
-    return out;
-  }
-  // build scales now
-  const scales = { C: buildScaleForKeyLimited('C'), G: buildScaleForKeyLimited('G'), F: buildScaleForKeyLimited('F') };
-  window.scales = scales;
-
-  // initial render
+  // initial render & expose
   renderAll();
-  setStatus('준비 완료 — 오선이 보이면 음표를 추가하고 Play 버튼으로 듣기', 'ok');
+  setStatus('준비 완료 — 오선이 보이면 음표를 추가하세요. (첫 재생은 버튼 클릭으로 오디오 권한 필요)', 'ok');
 
-  // Expose key funcs globally
   window.renderAll = renderAll;
   window.addNoteToMeasure = addNoteToMeasure;
   window.clearMeasure = clearMeasure;
