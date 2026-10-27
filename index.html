@@ -30,10 +30,39 @@ button.danger{background:#ef4444;color:#fff;border:0}
 .solfeggio{display:flex;gap:6px;align-items:center}
 .solfeggio button{padding:6px 8px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;cursor:pointer;font-weight:700}
 .solfeggio .oct{display:flex;gap:6px;align-items:center;margin-left:8px}
+.small{font-size:13px;color:#556}
 </style>
 
-<!-- 안정적인 VexFlow CDN (jsDelivr) -->
-<script src="https://cdn.jsdelivr.net/npm/vexflow/releases/vexflow-min.js"></script>
+<!-- VexFlow (specific stable v4 build) -->
+<script>
+  // Safe loader: try specific VexFlow v4 release on unpkg then jsDelivr fallback
+  (function(){
+    if (window.Vex && window.Vex.Flow){ window.__vex_ready = true; return; }
+    window.__vex_ready = false;
+    function loadScript(url){
+      return new Promise(function(resolve,reject){
+        var s=document.createElement('script'); s.src=url; s.async=true;
+        s.onload=function(){ resolve(url); };
+        s.onerror=function(){ reject(url); };
+        document.head.appendChild(s);
+      });
+    }
+    (async function tryLoad(){
+      var cdns = [
+        'https://unpkg.com/vexflow@4.2.3/releases/vexflow-min.js',
+        'https://cdn.jsdelivr.net/npm/vexflow@4.2.3/releases/vexflow-min.js'
+      ];
+      for (var i=0;i<cdns.length;i++){
+        try{
+          await loadScript(cdns[i]);
+          if (window.Vex && window.Vex.Flow){ window.__vex_ready = true; console.info('VexFlow loaded from', cdns[i]); return; }
+        }catch(e){ console.warn('VexFlow load fail:', cdns[i]); }
+      }
+      console.error('VexFlow failed to load. Check network.');
+    })();
+  })();
+</script>
+
 <!-- Tone.js + Midi -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
@@ -78,7 +107,7 @@ button.danger{background:#ef4444;color:#fff;border:0}
   </div>
 
   <div style="display:flex;gap:8px;justify-content:center;align-items:center;margin-bottom:8px">
-    <label>템포: <input id="tempoInput" type="number" value="100" min="40" max="200" style="width:90px"></label>
+    <label>템포 <span class="small">(빠르기)</span>: <input id="tempoInput" type="number" value="100" min="40" max="240" style="width:90px"></label>
     <button id="saveJsonBtn" style="background:#10b981;color:white;border:0">💾 저장</button>
     <button id="loadJsonBtn" style="background:#06b6d4;color:white;border:0">📂 불러오기</button>
     <input id="fileInput" type="file" accept=".json" style="display:none">
@@ -120,7 +149,7 @@ button.danger{background:#ef4444;color:#fff;border:0}
       <button data-solf="si">시</button>
       <div class="oct">
         <button id="octDown">－</button>
-        <span id="octDisplay" style="min-width:22px;text-align:center;font-weight:700">4</span>
+        <span id="octDisplay" style="min-width:22px;text-align:center;font-weight:700">3</span>
         <button id="octUp">＋</button>
       </div>
     </div>
@@ -132,32 +161,61 @@ button.danger{background:#ef4444;color:#fff;border:0}
 </div>
 
 <script>
-/*
-  이 스크립트는 VexFlow가 이미 로드된 상태에서 실행됩니다.
-  (위에 jsDelivr로 미리 로드했으므로 DOMContentLoaded 시 바로 사용 가능)
-*/
-document.addEventListener('DOMContentLoaded', function(){
+/* Main app: waits for VexFlow then initializes. Keeps functions available on window for onclick handlers. */
+(async function(){
+  // Wait for VexFlow readiness (set by loader)
+  const waitForVex = async (timeout = 6000) => {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      if (window.Vex && window.Vex.Flow) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return !!(window.Vex && window.Vex.Flow);
+  };
+  const vexOk = await waitForVex(8000);
+  if (!vexOk){
+    document.getElementById('status').textContent = '악보 엔진(VexFlow) 로드 실패 — 네트워크 확인';
+    document.getElementById('status').className = 'status err';
+    console.error('VexFlow not loaded');
+    return;
+  }
 
-  // 기본 상수/상태
+  // Basic constants and state
   const NUM_MEASURES = 8;
   const BEATS_PER_MEASURE = 4;
   const beatValue = { w:4, h:2, q:1, '8':0.5 };
   let tempo = 100;
-  let currentOctave = 4;
+  let currentOctave = 3; // lowered default
+  const MIN_OCTAVE = 2;
+  const MAX_OCTAVE = 6;
+
   const measures = Array.from({length:NUM_MEASURES}, ()=>[]);
   const history = [];
+
   const SF_BASE = 'https://gleitz.github.io/midi-js-soundfonts/FluidR3_GM/';
   const instrMap = { acoustic_grand_piano:'acoustic_grand_piano', flute:'flute', acoustic_guitar_nylon:'acoustic_guitar_nylon', electric_guitar_clean:'electric_guitar_clean', violin:'violin', xylophone:'xylophone' };
 
-  // audio & synth
-  let synthPrimary = null, melodySampler = null, samplerReady = false, accompSampler = null, accompReady = false;
+  // Audio setup
+  let synthPrimary = null;
+  let melodySampler = null;
+  let samplerReady = false;
+
+  // accompaniment chain: accompGain controls accompaniment volume
+  const accompGain = new Tone.Gain(0.35).toDestination(); // default 0.35
+  let accompSampler = null;
+  let accompReady = false;
+
+  // improved synthetic drum fallback
+  const kickSynth = new Tone.MembraneSynth({ pitchDecay:0.01, octaves:2, envelope:{ attack:0.001, decay:0.6, sustain:0.01, release:0.1 } }).connect(accompGain);
+  const snareSynth = new Tone.NoiseSynth({ noise:{ type:'white' }, envelope:{ attack:0.001, decay:0.25, sustain:0 } }).connect(accompGain);
+  const hhSynth = new Tone.MetalSynth({ frequency:600, envelope:{ attack:0.001, decay:0.08, release:0.01 }, harmonicity:5.1, modulationIndex:32 }).connect(accompGain);
 
   function setStatus(text, cls='ok', force=false){
     const s = document.getElementById('status');
     s.textContent = text; s.className = 'status ' + cls;
   }
   function flashError(msg){
-    const s = document.getElementById('status'); s.textContent = msg; s.className='status err';
+    const s = document.getElementById('status'); s.textContent = msg; s.className = 'status err';
     setTimeout(()=>{ setStatus('작성 계속하세요!', 'ok', true); }, 2200);
   }
 
@@ -165,31 +223,27 @@ document.addEventListener('DOMContentLoaded', function(){
     try{ if (synthPrimary) synthPrimary.dispose(); }catch(e){}
     synthPrimary = new Tone.PolySynth(Tone.Synth, { maxPolyphony:8 }).toDestination();
     synthPrimary.set({ voice:{ envelope:{ attack:0.01, decay:0.1, sustain:0.9, release:0.2 } } });
-    setStatus('합성기 준비됨','ok',true);
+    setStatus('합성기 준비됨', 'ok', true);
   }
   initSynth();
 
-  // 전역으로 필요한 함수들을 아래에서 정의한 뒤 window에 노출합니다.
-
-  // playMelodyNote: 전역으로 노출
+  // play helper for melody
   function playMelodyNote(name, dur, at){
     try{
       if (samplerReady && melodySampler) melodySampler.triggerAttackRelease(name, dur, at);
       else synthPrimary.triggerAttackRelease(name, dur, at);
-    }catch(e){ try{ synthPrimary.triggerAttackRelease(name, dur, at); }catch(_){} }
+    }catch(e){
+      try{ synthPrimary.triggerAttackRelease(name, dur, at); }catch(_){}
+    }
   }
   window.playMelodyNote = playMelodyNote;
 
-  // VexFlow helpers
-  const VF = window.Vex && window.Vex.Flow;
-  function noteToVexKey(note){
-    if (!note) return 'b/4';
-    const d = note.display;
-    const acc = (d.a === '#')? '#' : (d.a === 'b'? 'b' : '');
-    return d.s + acc + '/' + d.o;
-  }
+  // VexFlow helpers and render
+  const VF = window.Vex.Flow;
+  function noteToVexKey(note){ if(!note) return 'b/4'; const d = note.display; const acc = (d.a === '#')? '#': (d.a === 'b' ? 'b' : ''); return d.s + acc + '/' + d.o; }
 
-  // 렌더 함수 (전역 노출)
+  let isPointerDown = false;
+
   function renderAll(){
     const scoreContainer = document.getElementById('score-container');
     scoreContainer.innerHTML = '';
@@ -212,7 +266,6 @@ document.addEventListener('DOMContentLoaded', function(){
       box.appendChild(hint);
       scoreContainer.appendChild(box);
 
-      // VexFlow rendering
       try{
         const renderer = new VF.Renderer(div, VF.Renderer.Backends.SVG);
         renderer.resize(staveWidth+20,160);
@@ -237,10 +290,11 @@ document.addEventListener('DOMContentLoaded', function(){
         setStatus('악보 렌더 중 오류(콘솔 확인)', 'err', true);
       }
 
-      // pointer events for adding/dragging notes
+      // pointer handlers
       div.addEventListener('pointerdown', async function(ev){
         ev.preventDefault();
         try{ this.setPointerCapture(ev.pointerId); }catch(e){}
+        // ensure previous measures are complete
         for (let p=0;p<i;p++){
           const sum = measures[p].reduce((s,n)=>s+n.beats,0);
           if (sum < BEATS_PER_MEASURE){ flashError((p+1)+'마디를 먼저 채워주세요.'); try{ this.releasePointerCapture(ev.pointerId); }catch(e){} return; }
@@ -263,9 +317,9 @@ document.addEventListener('DOMContentLoaded', function(){
           if (measures[i].length > 0){
             const slotW = rect.width / measures[i].length;
             const px = ev.clientX - rect.left;
-            let nearestIdx = Math.floor(px / slotW);
-            nearestIdx = Math.max(0, Math.min(measures[i].length-1, nearestIdx));
-            this._draggingStarted = { noteIdx: nearestIdx, fromPitch: measures[i][nearestIdx].isRest?null:measures[i][nearestIdx].pitch };
+            let idxNote = Math.floor(px / slotW);
+            idxNote = Math.max(0, Math.min(measures[i].length-1, idxNote));
+            this._draggingStarted = { noteIdx: idxNote, fromPitch: measures[i][idxNote].isRest ? null : measures[i][idxNote].pitch };
             this.parentElement.classList.add('dragging');
           }
         }
@@ -315,7 +369,7 @@ document.addEventListener('DOMContentLoaded', function(){
   }
   window.renderAll = renderAll;
 
-  // addNoteToMeasure (전역)
+  // add note (adds only to the specified measure; plays melody note)
   function addNoteToMeasure(measureIdx, scaleNoteObj, durKey, isRest){
     if (measureIdx < 0 || measureIdx >= NUM_MEASURES) return false;
     const beats = beatValue[durKey];
@@ -328,36 +382,31 @@ document.addEventListener('DOMContentLoaded', function(){
       const durSec = beats * (60/tempo);
       playMelodyNote(stored.pitch.play, durSec, Tone.now());
     }
-    try{ localStorage.setItem('composer_autosave_v1', JSON.stringify({ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value) })); }catch(e){}
+    try{ localStorage.setItem('composer_autosave_v2', JSON.stringify({ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value) })); }catch(e){}
     renderAll();
     return true;
   }
   window.addNoteToMeasure = addNoteToMeasure;
 
-  // clearMeasure
-  function clearMeasure(idx){
-    if (measures[idx].length===0) return;
-    if (!confirm((idx+1)+'마디를 지우시겠습니까?')) return;
-    const prev = JSON.parse(JSON.stringify(measures[idx]));
-    measures[idx]=[];
-    history.push({ type:'clear', measure: idx, prev: prev });
-    try{ localStorage.setItem('composer_autosave_v1', JSON.stringify({ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value) })); }catch(e){}
-    renderAll();
-  }
+  function clearMeasure(idx){ if (measures[idx].length===0) return; if (!confirm((idx+1)+'마디를 지우시겠습니까?')) return; const prev=JSON.parse(JSON.stringify(measures[idx])); measures[idx]=[]; history.push({ type:'clear', measure: idx, prev: prev }); try{ localStorage.setItem('composer_autosave_v2', JSON.stringify({ key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value) })); }catch(e){} renderAll(); }
   window.clearMeasure = clearMeasure;
 
-  // simple scale builder
-  const semitoneMaster = (function(){ const arr=[]; const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; for (let o=6;o>=4;o--) for (const n of names) arr.push(n+o); return arr; })();
+  // Scales
+  const semitoneMaster = (function(){ const out=[]; const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; for (let o=6;o>=2;o--) for (const n of names) out.push(n+o); return out; })();
   function buildScaleForKey(key){
-    const tonicMap = {C:0,G:7,F:5};
-    const pcMap = {'C':0,'C#':1,'D':2,'D#':3,'E':4,'F':5,'F#':6,'G':7,'G#':8,'A':9,'A#':10,'B':11};
-    const diatonic=[0,2,4,5,7,9,11]; const t = tonicMap[key]; const out=[];
+    const tonicMap = { C:0, G:7, F:5 };
+    const pcMap = { C:0,'C#':1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,A:9,'A#':10,B:11 };
+    const diatonic=[0,2,4,5,7,9,11];
+    const t = tonicMap[key];
+    const out = [];
     for (const nm of semitoneMaster){
-      const namePart = nm.slice(0,-1); const oct = parseInt(nm.slice(-1),10); const pc = pcMap[namePart];
+      const namePart = nm.slice(0,-1);
+      const oct = parseInt(nm.slice(-1),10);
+      const pc = pcMap[namePart];
       const rel = (pc - t + 12) % 12;
-      if (diatonic.includes(rel)){
+      if (diatonic.indexOf(rel) >= 0){
         let disp = namePart;
-        if (key==='F' && namePart==='A#') disp='Bb';
+        if (key === 'F' && namePart === 'A#') disp = 'Bb';
         const acc = disp.length>1 ? (disp[1]==='#'?'#':'b') : '';
         out.push({ display:{ s: disp[0].toLowerCase(), a: acc, o: oct }, play: disp + oct });
       }
@@ -367,156 +416,197 @@ document.addEventListener('DOMContentLoaded', function(){
   const scales = { C: buildScaleForKey('C'), G: buildScaleForKey('G'), F: buildScaleForKey('F') };
   window.scales = scales;
 
-  // recommendation (context-aware)
-  function recommendContextNote(){
+  // Recommendation: fill only remaining beats in current measure
+  function durationOrder() { return ['w','h','q','8']; }
+  function beatsFor(d){ return beatValue[d] || 1; }
+
+  function recommendNoteForCurrentMeasure(){
     const key = document.getElementById('keySelect').value;
     const scale = scales[key];
+    const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
+    if (idx < 0) return null;
+    // pick contextual note: tonic/near previous
     let prev = null;
-    for (let i=0;i<NUM_MEASURES;i++) if (measures[i].length>0) prev = measures[i][measures[i].length-1];
-    if (!prev){ const root = triad(key,currentOctave)[0]; return { display:{ s: root[0].toLowerCase(), a:(root[1]==='#'?'#':''), o:currentOctave }, play: root }; }
-    const p = prev.pitch.play; const idx = scales[key].findIndex(s=>s.play===p); let targetIdx = (idx>=0)?idx:Math.floor(scales[key].length/2); const step = Math.floor(Math.random()*3)-1; targetIdx = Math.max(0, Math.min(scales[key].length-1, targetIdx+step)); const s = scales[key][targetIdx]; return { display:s.display, play:s.play };
+    for (let i=0;i<NUM_MEASURES;i++){ if (measures[i].length>0) prev = measures[i][measures[i].length-1]; }
+    if (!prev){
+      const root = triad(key, currentOctave)[0];
+      return { note: scale[Math.floor(scale.length/2)], dur:'q' };
+    }
+    const p = prev.pitch.play;
+    const pi = scale.findIndex(s=>s.play===p);
+    let candIdx = (pi>=0)?pi:Math.floor(scale.length/2);
+    // prefer stepwise
+    const step = Math.floor(Math.random()*3)-1;
+    candIdx = Math.max(0, Math.min(scale.length-1, candIdx+step));
+    // choose duration to fit remaining beats
+    const remaining = BEATS_PER_MEASURE - measures[idx].reduce((s,n)=>s+n.beats,0);
+    const durCandidates = durationOrder().filter(d=>beatsFor(d) <= remaining);
+    const dur = durCandidates.length ? durCandidates[Math.floor(Math.random()*durCandidates.length)] : 'q';
+    return { note: scale[candIdx], dur: dur };
   }
 
-  // triad helper
-  function triad(root, oct){
-    const semis = { C:0,'C#':1,Db:1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,Ab:8,A:9,'A#':10,Bb:10,B:11 };
-    function findName(val){ for (const p in semis) if (semis[p]===val) return p; return 'C'; }
-    const mapping = { Bb:'A#' }; const r = mapping[root] || root; const idx = semis[r]!==undefined?semis[r]:0; const third=(idx+4)%12; const fifth=(idx+7)%12; return [findName(idx)+oct, findName(third)+oct, findName(fifth)+oct];
-  }
+  document.getElementById('recommendNoteBtn').addEventListener('click', async ()=>{
+    try{ await Tone.start(); if (Tone.context && Tone.context.state==='suspended') await Tone.context.resume(); }catch(e){ console.warn(e); }
+    const rec = recommendNoteForCurrentMeasure();
+    if (!rec){ flashError('빈 마디가 없습니다'); return; }
+    addNoteToMeasure(measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE), rec.note, rec.dur, false);
+  });
 
-  // button bindings with Tone.start ensure
-  function ensureAudioThen(fn){
-    return async function(...args){
-      try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('Tone.start failed', e); }
-      return fn.apply(this, args);
-    };
-  }
+  document.getElementById('recommendMelodyBtn').addEventListener('click', async ()=>{
+    try{ await Tone.start(); if (Tone.context && Tone.context.state==='suspended') await Tone.context.resume(); }catch(e){ console.warn(e); }
+    const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
+    if (idx < 0){ flashError('추천할 빈 마디가 없습니다'); return; }
+    let remaining = BEATS_PER_MEASURE - measures[idx].reduce((s,n)=>s+n.beats,0);
+    const key = document.getElementById('keySelect').value;
+    const scale = scales[key];
+    let cur = Math.floor(scale.length/2);
+    while (remaining > 0){
+      // pick duration fitting remaining
+      const possible = ['q','h','8','w'].filter(d=>beatsFor(d) <= remaining).sort((a,b)=>beatsFor(b)-beatsFor(a));
+      const d = possible[0] || 'q';
+      // stepwise motion
+      const step = Math.floor(Math.random()*3)-1;
+      cur = Math.max(0, Math.min(scale.length-1, cur + step));
+      addNoteToMeasure(idx, scale[cur], d, false);
+      remaining -= beatsFor(d);
+    }
+    setStatus('추천 멜로디 적용', 'ok', true);
+  });
 
-  // solfeggio buttons
+  // Solfeggio buttons (도레미) with octave control (min 2)
   document.querySelectorAll('.solfeggio button[data-solf]').forEach(btn=>{
-    btn.addEventListener('click', ensureAudioThen(function(){
+    btn.addEventListener('click', async ()=>{
+      try{ await Tone.start(); if (Tone.context && Tone.context.state==='suspended') await Tone.context.resume(); }catch(e){ console.warn(e); }
       const map = { do:0, re:1, mi:2, fa:3, sol:4, la:5, si:6 };
       const deg = map[btn.getAttribute('data-solf')];
       const key = document.getElementById('keySelect').value;
-      const note = scales[key][deg] || scales[key][0];
+      const scale = scales[key];
+      // find a note in scale at selected octave or nearest
+      let candidate = scale.find(s => s.display.o === currentOctave && scales[key].indexOf(s) % 7 === deg);
+      if (!candidate){
+        // fallback pick degree deg in scale, set desired octave
+        const base = scale[Math.max(0, Math.min(scale.length-1, deg))];
+        candidate = { display: { s: base.display.s, a: base.display.a, o: currentOctave }, play: base.play.replace(/\d$/, String(currentOctave)) };
+      } else {
+        // ensure play octave matches currentOctave
+        candidate = { display: { s: candidate.display.s, a: candidate.display.a, o: currentOctave }, play: candidate.play.replace(/\d$/, String(currentOctave)) };
+      }
       const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
-      if (idx<0){ flashError('빈 마디 없음'); return; }
-      addNoteToMeasure(idx, note, selectedDur, false);
-    }));
+      if (idx < 0){ flashError('빈 마디가 없습니다.'); return; }
+      addNoteToMeasure(idx, candidate, selectedDur, false);
+    });
   });
 
-  // recommend buttons
-  document.getElementById('recommendNoteBtn').addEventListener('click', ensureAudioThen(function(){
-    const note = recommendContextNote();
-    const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) < BEATS_PER_MEASURE);
-    if (idx<0){ flashError('빈 칸 없음'); return; }
-    addNoteToMeasure(idx, note, 'q', false);
-  }));
-  document.getElementById('recommendMelodyBtn').addEventListener('click', ensureAudioThen(function(){
-    const idx = measures.findIndex(m=>m.reduce((s,n)=>s+n.beats,0) === 0);
-    if (idx<0){ flashError('추천할 빈 마디 없음'); return; }
-    const key = document.getElementById('keySelect').value; const scale = scales[key];
-    const startIndex = Math.floor(scale.length/2);
-    const patterns = [['q','q','q','q'],['h','q','q'],['q','q','h'],['q','8','8','q']];
-    const pat = patterns[Math.floor(Math.random()*patterns.length)];
-    measures[idx] = []; let cur = startIndex;
-    for (const d of pat){ const mv = Math.floor(Math.random()*3)-1; cur = Math.max(0, Math.min(scale.length-1, cur+mv)); addNoteToMeasure(idx, scale[cur], d, false); }
-    setStatus('추천 멜로디 적용','ok',true);
-  }));
+  document.getElementById('octUp').addEventListener('click', ()=>{ if (currentOctave < MAX_OCTAVE) currentOctave++; document.getElementById('octDisplay').textContent = currentOctave; });
+  document.getElementById('octDown').addEventListener('click', ()=>{ if (currentOctave > MIN_OCTAVE) currentOctave--; document.getElementById('octDisplay').textContent = currentOctave; });
 
-  // play / stop bindings
-  document.getElementById('playBtn').addEventListener('click', ensureAudioThen(async ()=>{
-    tempo = parseInt(document.getElementById('tempoInput').value)||100;
-    const uniq = new Set();
-    for (const m of measures) for (const n of m) if (!n.isRest && n.pitch && n.pitch.play) uniq.add(n.pitch.play);
-    const used = Array.from(uniq);
-    const instr = document.getElementById('instrSelect').value;
-    if (used.length>0) loadMelodySampler(instr, used);
-    const accomp = document.getElementById('accompSelect').value;
-    if (accomp!=='none') loadAccompSampler(accomp, used);
-    scheduleAllAndStart();
-  }));
-
-  document.getElementById('stopBtn').addEventListener('click', function(){
-    try{ Tone.Transport.stop(); Tone.Transport.cancel(); }catch(e){}
-    try{ if (synthPrimary){ synthPrimary.releaseAll(); synthPrimary.dispose(); } }catch(e){}
-    initSynth();
-    setStatus('정지', 'ok', true);
-  });
-
-  // init durations labels and handlers
-  let selectedDur='q', selectedIsRest=false;
+  // duration buttons
+  let selectedDur = 'q';
+  let selectedIsRest = false;
   function setActiveButtons(){ document.querySelectorAll('.dur-btn').forEach(b=>b.classList.remove('active')); const el=document.getElementById('dur_'+selectedDur); if (el) el.classList.add('active'); }
-  setActiveButtons();
   ['w','h','q','8'].forEach(d=>{
-    const id = 'dur_'+d;
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('click', ()=>{ selectedIsRest=false; selectedDur=d; setActiveButtons(); });
-    const rid = 'rest_'+d; const rel = document.getElementById(rid);
-    if (rel) rel.addEventListener('click', ()=>{ selectedIsRest=true; selectedDur=d; setActiveButtons(); });
+    const b = document.getElementById('dur_'+d);
+    if (b) b.addEventListener('click', ()=>{ selectedIsRest=false; selectedDur=d; setActiveButtons(); });
+    const rb = document.getElementById('rest_'+d);
+    if (rb) rb.addEventListener('click', ()=>{ selectedIsRest=true; selectedDur=d; setActiveButtons(); });
   });
+  setActiveButtons();
 
-  // sample loading functions (kept small)
+  // Sample mapping helpers
   async function findSampleName(baseUrl, note){
-    const tries=[note+'.mp3', encodeURIComponent(note)+'.mp3'];
-    const sharpToFlat={'C#':'Db','D#':'Eb','F#':'Gb','G#':'Ab','A#':'Bb'};
+    const tries = [ note + '.mp3', encodeURIComponent(note) + '.mp3' ];
+    const sharpToFlat = { 'C#':'Db','D#':'Eb','F#':'Gb','G#':'Ab','A#':'Bb' };
     const m = note.match(/^([A-G])([#b]?)(\d)$/);
-    if (m && m[2]==='#'){ const flat = sharpToFlat[m[1]+'#']; if (flat) tries.push(flat+m[3]+'.mp3', encodeURIComponent(flat+m[3])+'.mp3'); }
-    for (const fn of tries){ try{ const r = await fetch(baseUrl+fn, { method:'HEAD' }); if (r && r.status===200) return fn; }catch(e){} }
+    if (m && m[2] === '#'){
+      const flat = sharpToFlat[m[1] + '#'];
+      if (flat) tries.push(flat + m[3] + '.mp3', encodeURIComponent(flat + m[3]) + '.mp3');
+    }
+    for (const fn of tries){
+      const url = baseUrl + fn;
+      try{
+        const r = await fetch(url, { method:'HEAD' });
+        if (r && r.status === 200) return fn;
+      }catch(e){}
+    }
     return null;
   }
-  async function buildMapping(baseUrl, notes){ const map={}; for (const n of notes){ const fn = await findSampleName(baseUrl, n); if (fn) map[n]=fn; } return map; }
+  async function buildMapping(baseUrl, notes){
+    const mapping = {};
+    for (const n of notes){
+      try{ const fn = await findSampleName(baseUrl, n); if (fn) mapping[n] = fn; }catch(e){ console.warn('mapping error', n, e); }
+    }
+    return mapping;
+  }
 
   async function loadMelodySampler(instr, notes){
-    samplerReady=false;
-    if (melodySampler){ try{ melodySampler.dispose(); }catch(e){} melodySampler=null; }
+    samplerReady = false;
+    if (melodySampler){ try{ melodySampler.dispose(); }catch(e){} melodySampler = null; }
     const folder = instrMap[instr] || instr;
     const baseUrl = SF_BASE + folder + '-mp3/';
     try{
-      setStatus('멜로디 샘플 확인중...','loading',true);
+      setStatus('멜로디 샘플 확인 중...', 'loading', true);
       const urls = await buildMapping(baseUrl, notes);
-      if (!urls || Object.keys(urls).length===0){ setStatus('멜로디 샘플 없음(합성기)','err',true); return; }
-      melodySampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ samplerReady=true; setStatus('멜로디 샘플 준비','ok',true); }, onerror:(e)=>{ console.warn(e); setStatus('멜로디 샘플 에러','err',true); } }).toDestination();
-    }catch(e){ console.warn(e); setStatus('샘플 로드 실패','err',true); }
+      if (!urls || Object.keys(urls).length === 0){ setStatus('멜로디 샘플 없음(합성기 폴백)', 'err', true); return; }
+      setStatus('멜로디 샘플 로드 중...', 'loading', true);
+      melodySampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ samplerReady = true; setStatus('멜로디 샘플 준비', 'ok', true); }, onerror:(e)=>{ console.warn(e); setStatus('멜로디 샘플 오류(폴백)', 'err', true); } }).toDestination();
+    }catch(e){ console.warn(e); setStatus('멜로디 샘플 로드 실패', 'err', true); }
   }
 
   async function loadAccompSampler(instr, notes){
-    accompReady=false;
-    if (accompSampler){ try{ accompSampler.dispose(); }catch(e){} accompSampler=null; }
-    if (instr==='none') return;
+    accompReady = false;
+    if (accompSampler){ try{ accompSampler.dispose(); }catch(e){} accompSampler = null; }
+    if (instr === 'none') return;
     const folder = instrMap[instr] || instr;
     const baseUrl = SF_BASE + folder + '-mp3/';
     try{
-      setStatus('반주 샘플 확인중...','loading',true);
+      setStatus('반주 샘플 확인 중...', 'loading', true);
       const urls = await buildMapping(baseUrl, notes.length>0?notes:['C4','E4','G4']);
-      if (!urls || Object.keys(urls).length===0){ setStatus('반주 샘플 없음(폴백)','err',true); return; }
-      accompSampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ accompReady=true; setStatus('반주 샘플 준비','ok',true); }, onerror:(e)=>{ console.warn(e); setStatus('반주 샘플 에러','err',true); } }).toDestination();
-    }catch(e){ console.warn(e); setStatus('반주 로드 실패','err',true); }
+      if (!urls || Object.keys(urls).length === 0){ setStatus('반주 샘플 없음(합성기 폴백)', 'err', true); return; }
+      setStatus('반주 샘플 로드 중...', 'loading', true);
+      accompSampler = new Tone.Sampler({ urls: urls, baseUrl: baseUrl, onload: ()=>{ accompReady = true; setStatus('반주 샘플 준비', 'ok', true); }, onerror:(e)=>{ console.warn(e); setStatus('반주 샘플 오류(폴백)', 'err', true); } });
+      // connect sampler to accompGain
+      accompSampler.connect(accompGain);
+    }catch(e){ console.warn(e); setStatus('반주 샘플 로드 실패','err',true); }
   }
 
-  // schedule accompaniment + melody (same as previous implementation)
-  function scheduleAccompMeasure(startTime, measureIndex){
+  // accompaniment scheduling
+  function scheduleAccompanimentMeasure(startTime, measureIndex){
     const type = document.getElementById('accompSelect').value;
     if (type === 'none') return;
     const root = chooseChordRoot(measureIndex);
     const chord = triad(root, currentOctave);
-    const beatSec = 60/tempo;
-    if (type === 'acoustic_grand_piano' || type === 'acoustic_guitar_nylon'){
+    const beatSec = 60 / tempo;
+    if (type === 'acoustic_grand_piano'){
       for (let b=0;b<4;b++){
         const t = startTime + b * beatSec;
-        if (type === 'acoustic_grand_piano'){
-          const arp = chord;
-          for (let i=0;i<arp.length;i++){ const nt = t + i*(beatSec/6); if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease(arp[i], beatSec*0.8, nt); }catch(e){ synthPrimary.triggerAttackRelease(arp[i], beatSec*0.8, nt); } } else synthPrimary.triggerAttackRelease(arp[i], beatSec*0.8, nt); }
-        } else {
-          for (let i=0;i<chord.length;i++){ const nt = t + i*0.02; if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease(chord[i], beatSec*0.95, nt); }catch(e){ synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt); } } else synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt); }
+        const arp = chord;
+        for (let i=0;i<arp.length;i++){ const nt = t + i*(beatSec/6);
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease(arp[i], beatSec*0.8, nt); }catch(e){ synthPrimary.triggerAttackRelease(arp[i], beatSec*0.8, nt);} }
+          else synthPrimary.triggerAttackRelease(arp[i], beatSec*0.8, nt);
+        }
+      }
+    } else if (type === 'acoustic_guitar_nylon'){
+      for (let b=0;b<4;b++){
+        const t = startTime + b * beatSec;
+        for (let i=0;i<chord.length;i++){ const nt = t + i*0.02;
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease(chord[i], beatSec*0.95, nt); }catch(e){ synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt);} }
+          else synthPrimary.triggerAttackRelease(chord[i], beatSec*0.95, nt);
         }
       }
     } else if (type === 'drum_kit'){
+      // attempt to use accompSampler mapped drum notes, else use synth fallback
       for (let b=0;b<4;b++){
         const t = startTime + b*beatSec;
-        if (b%2===0){ if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('C2',0.12,t); }catch(e){ synthPrimary.triggerAttackRelease('C2',0.12,t); } } else synthPrimary.triggerAttackRelease('C2',0.12,t); }
-        else { if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('D2',0.12,t); }catch(e){ synthPrimary.triggerAttackRelease('D2',0.12,t); } } else synthPrimary.triggerAttackRelease('D2',0.12,t); }
-        const t2 = t + beatSec/2; if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('G4',0.06,t); accompSampler.triggerAttackRelease('G4',0.06,t2);}catch(e){ synthPrimary.triggerAttackRelease('G4',0.06,t); synthPrimary.triggerAttackRelease('G4',0.06,t2);} } else { synthPrimary.triggerAttackRelease('G4',0.06,t); synthPrimary.triggerAttackRelease('G4',0.06,t2); }
+        if (b%2===0){
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('C2',0.12,t); }catch(e){ kickSynth.triggerAttackRelease('C2', 0.12, t); } }
+          else kickSynth.triggerAttackRelease('C2', 0.12, t);
+        } else {
+          if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('D2',0.12,t); }catch(e){ snareSynth.triggerAttackRelease('C4', 0.12, t); } }
+          else snareSynth.triggerAttackRelease('C4', 0.12, t);
+        }
+        const t2 = t + beatSec/2;
+        if (accompReady && accompSampler){ try{ accompSampler.triggerAttackRelease('G4',0.06,t); accompSampler.triggerAttackRelease('G4',0.06,t2); }catch(e){ hhSynth.triggerAttackRelease('G4',0.06,t); hhSynth.triggerAttackRelease('G4',0.06,t2); } }
+        else { hhSynth.triggerAttackRelease('G4',0.06,t); hhSynth.triggerAttackRelease('G4',0.06,t2); }
       }
     }
   }
@@ -526,9 +616,9 @@ document.addEventListener('DOMContentLoaded', function(){
     const beatSec = 60/tempo;
     let t = Tone.now() + 0.06;
     for (let m=0;m<NUM_MEASURES;m++){
-      (function(measureIndex,startT){
+      (function(measureIndex, startT){
         Tone.Transport.schedule((time)=>{ document.querySelectorAll('.measure-box').forEach(b=>b.classList.remove('active')); const boxes=document.querySelectorAll('.measure-box'); if (boxes[measureIndex]) boxes[measureIndex].classList.add('active'); }, startT - (Tone.now()+0.06));
-        Tone.Transport.schedule((time)=>{ scheduleAccompMeasure(time, measureIndex); }, startT - (Tone.now()+0.06));
+        Tone.Transport.schedule((time)=>{ scheduleAccompanimentMeasure(time, measureIndex); }, startT - (Tone.now()+0.06));
         let inner = startT;
         for (const note of measures[measureIndex]){
           const durSec = note.beats * beatSec;
@@ -542,33 +632,92 @@ document.addEventListener('DOMContentLoaded', function(){
     try{ Tone.Transport.start(); }catch(e){ console.warn('Transport start error', e); }
   }
 
-  // chord helper
+  // chord helpers
   function chooseChordRoot(measureIdx){
     const key = document.getElementById('keySelect').value;
     const counts = {};
-    for (const n of measures[measureIdx]) if (!n.isRest && n.pitch && n.pitch.play){ const p = n.pitch.play.match(/^([A-G][#b]?)/); const pc = p ? p[0] : n.pitch.play; counts[pc] = (counts[pc]||0) + 1; }
+    for (const n of measures[measureIdx]) if (!n.isRest && n.pitch && n.pitch.play){ const m = n.pitch.play.match(/^([A-G][#b]?)/); const pc = m?m[0]:n.pitch.play; counts[pc] = (counts[pc]||0)+1; }
     if (!Object.keys(counts).length) return key;
-    const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]); return entries[0][0];
+    const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+    return entries[0][0];
   }
+  function triad(root, oct){
+    const semis = { C:0,'C#':1,Db:1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,Ab:8,A:9,'A#':10,Bb:10,B:11 };
+    const findName = val=>{ for (const p in semis) if (semis[p]===val) return p; return 'C'; };
+    const mapping = { Bb:'A#' }; const r = mapping[root] || root; const idx = semis[r]!==undefined?semis[r]:0; const third=(idx+4)%12; const fifth=(idx+7)%12; return [findName(idx)+oct, findName(third)+oct, findName(fifth)+oct];
+  }
+
+  // recommend and solfeggio handlers already set below
+  // Save/load/export simplified (kept working)
+  document.getElementById('saveJsonBtn').addEventListener('click', ()=>{
+    try{
+      const obj = { key:document.getElementById('keySelect').value, measures:measures, tempo:parseInt(document.getElementById('tempoInput').value) || 100 };
+      const blob = new Blob([JSON.stringify(obj,null,2)], { type:'application/json' });
+      const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href = url; a.download = '활동내용.json'; a.click(); URL.revokeObjectURL(url);
+    }catch(e){ console.warn(e); flashError('저장 실패'); }
+  });
+  document.getElementById('loadJsonBtn').addEventListener('click', ()=> document.getElementById('fileInput').click());
+  document.getElementById('fileInput').addEventListener('change', ev=>{
+    const f = ev.target.files[0]; if (!f) return; const r = new FileReader();
+    r.onload = ()=>{ try{ const obj = JSON.parse(r.result); if (!obj.measures) throw 'invalid'; for (let i=0;i<NUM_MEASURES && i<obj.measures.length;i++) measures[i]=obj.measures[i]; if (obj.key) document.getElementById('keySelect').value=obj.key; if (obj.tempo) document.getElementById('tempoInput').value=obj.tempo; renderAll(); setStatus('불러오기 완료','ok',true); } catch(e){ alert('불러오기 실패'); } };
+    r.readAsText(f); ev.target.value='';
+  });
+
+  document.getElementById('exportMidiBtn').addEventListener('click', ()=>{
+    try{
+      const midi = new Midi(); const track = midi.addTrack(); const tempoVal = parseInt(document.getElementById('tempoInput').value) || 100; midi.header.setTempo(tempoVal);
+      let currentTime = 0; const secPerBeat = 60/tempoVal;
+      for (let m=0;m<NUM_MEASURES;m++){
+        for (const n of measures[m]){
+          const durSec = n.beats * secPerBeat;
+          if (!n.isRest) track.addNote({ name: n.pitch.play, time: currentTime, duration: durSec, velocity: 0.9 });
+          currentTime += durSec;
+        }
+      }
+      const midiData = midi.toArray(); const blob = new Blob([midiData], { type:'audio/midi' }); const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href = url; a.download = '나의_음악.mid'; a.click(); URL.revokeObjectURL(url);
+      setStatus('MIDI 생성 완료', 'ok', true);
+    }catch(e){ console.warn(e); flashError('MIDI 생성 실패'); }
+  });
+
+  // play/stop with user gesture guarantee
+  document.getElementById('playBtn').addEventListener('click', async ()=>{
+    try{ await Tone.start(); if (Tone.context && Tone.context.state === 'suspended') await Tone.context.resume(); }catch(e){ console.warn('Tone.start failed', e); }
+    tempo = parseInt(document.getElementById('tempoInput').value) || 100;
+    const uniq = new Set(); for (const m of measures) for (const n of m) if (!n.isRest && n.pitch && n.pitch.play) uniq.add(n.pitch.play);
+    const usedNotes = Array.from(uniq);
+    const instr = document.getElementById('instrSelect').value; if (usedNotes.length>0) loadMelodySampler(instr, usedNotes);
+    const accomp = document.getElementById('accompSelect').value; if (accomp !== 'none') loadAccompSampler(accomp, usedNotes);
+    scheduleAllAndStart();
+  });
+
+  document.getElementById('stopBtn').addEventListener('click', ()=>{
+    try{ Tone.Transport.stop(); Tone.Transport.cancel(); }catch(e){}
+    try{ if (synthPrimary){ synthPrimary.releaseAll(); synthPrimary.dispose(); } }catch(e){}
+    initSynth();
+    setStatus('정지', 'ok', true);
+  });
+
+  // solfeggio initial bindings (done above)
+  document.querySelectorAll('.solfeggio button[data-solf]').forEach(btn=>{
+    // already bound earlier via inline; keep these safe duplicates if needed
+  });
 
   // initial render
   renderAll();
 
-  // expose helpers globally for safety (onclick strings)
+  // expose key functions globally (for onclick strings)
   window.addNoteToMeasure = addNoteToMeasure;
   window.clearMeasure = clearMeasure;
   window.renderAll = renderAll;
   window.playMelodyNote = playMelodyNote;
   window.setActiveButtons = setActiveButtons;
-  window.recommendContextNote = recommendContextNote;
   window.loadMelodySampler = loadMelodySampler;
   window.loadAccompSampler = loadAccompSampler;
   window.scheduleAllAndStart = scheduleAllAndStart;
 
-  // Done initialization
-  setStatus('준비 완료 — 오선이 보이면 음표 클릭/도레미/추천으로 편집하세요.', 'ok', true);
+  setStatus('준비 완료 — 오선이 보이면 음표를 추가해보세요. (첫 재생은 버튼 클릭으로 오디오 권한 필요)', 'ok', true);
 
-}); // DOMContentLoaded
+})(); // end main
 </script>
 </body>
 </html>
